@@ -13,6 +13,7 @@ pub use self::code_stats::{SizeKind, TypeSizeInfo, VariantInfo};
 
 use dep_graph::DepGraph;
 use hir::def_id::{CrateNum, DefIndex};
+
 use lint;
 use middle::cstore::CrateStore;
 use middle::dependency_format;
@@ -37,18 +38,15 @@ use syntax_pos::{Span, MultiSpan};
 use rustc_back::{LinkerFlavor, PanicStrategy};
 use rustc_back::target::Target;
 use rustc_data_structures::flock;
-use llvm;
 
 use std::path::{Path, PathBuf};
 use std::cell::{self, Cell, RefCell};
 use std::collections::HashMap;
 use std::env;
-use std::ffi::CString;
 use std::io::Write;
 use std::rc::Rc;
 use std::fmt;
 use std::time::Duration;
-use libc::c_int;
 
 mod code_stats;
 pub mod config;
@@ -160,14 +158,14 @@ impl Session {
     pub fn struct_span_warn<'a, S: Into<MultiSpan>>(&'a self,
                                                     sp: S,
                                                     msg: &str)
-                                                    -> DiagnosticBuilder<'a>  {
+                                                    -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_span_warn(sp, msg)
     }
     pub fn struct_span_warn_with_code<'a, S: Into<MultiSpan>>(&'a self,
                                                               sp: S,
                                                               msg: &str,
                                                               code: &str)
-                                                              -> DiagnosticBuilder<'a>  {
+                                                              -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_span_warn_with_code(sp, msg, code)
     }
     pub fn struct_warn<'a>(&'a self, msg: &str) -> DiagnosticBuilder<'a>  {
@@ -176,30 +174,34 @@ impl Session {
     pub fn struct_span_err<'a, S: Into<MultiSpan>>(&'a self,
                                                    sp: S,
                                                    msg: &str)
-                                                   -> DiagnosticBuilder<'a>  {
+                                                   -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_span_err(sp, msg)
     }
     pub fn struct_span_err_with_code<'a, S: Into<MultiSpan>>(&'a self,
                                                              sp: S,
                                                              msg: &str,
                                                              code: &str)
-                                                             -> DiagnosticBuilder<'a>  {
+                                                             -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_span_err_with_code(sp, msg, code)
     }
-    pub fn struct_err<'a>(&'a self, msg: &str) -> DiagnosticBuilder<'a>  {
+    // FIXME: This method should be removed (every error should have an associated error code).
+    pub fn struct_err<'a>(&'a self, msg: &str) -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_err(msg)
+    }
+    pub fn struct_err_with_code<'a>(&'a self, msg: &str, code: &str) -> DiagnosticBuilder<'a> {
+        self.diagnostic().struct_err_with_code(msg, code)
     }
     pub fn struct_span_fatal<'a, S: Into<MultiSpan>>(&'a self,
                                                      sp: S,
                                                      msg: &str)
-                                                     -> DiagnosticBuilder<'a>  {
+                                                     -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_span_fatal(sp, msg)
     }
     pub fn struct_span_fatal_with_code<'a, S: Into<MultiSpan>>(&'a self,
                                                                sp: S,
                                                                msg: &str,
                                                                code: &str)
-                                                               -> DiagnosticBuilder<'a>  {
+                                                               -> DiagnosticBuilder<'a> {
         self.diagnostic().struct_span_fatal_with_code(sp, msg, code)
     }
     pub fn struct_fatal<'a>(&'a self, msg: &str) -> DiagnosticBuilder<'a>  {
@@ -627,6 +629,7 @@ pub fn build_session_(sopts: config::Options,
         }
     };
     let target_cfg = config::build_target_config(&sopts, &span_diagnostic);
+
     let p_s = parse::ParseSess::with_span_handler(span_diagnostic, codemap);
     let default_sysroot = match sopts.maybe_sysroot {
         Some(_) => None,
@@ -696,8 +699,6 @@ pub fn build_session_(sopts: config::Options,
         out_of_fuel: Cell::new(false),
     };
 
-    init_llvm(&sess);
-
     sess
 }
 
@@ -724,55 +725,6 @@ pub enum IncrCompSession {
     InvalidBecauseOfErrors {
         session_directory: PathBuf,
     }
-}
-
-fn init_llvm(sess: &Session) {
-    unsafe {
-        // Before we touch LLVM, make sure that multithreading is enabled.
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        static mut POISONED: bool = false;
-        INIT.call_once(|| {
-            if llvm::LLVMStartMultithreaded() != 1 {
-                // use an extra bool to make sure that all future usage of LLVM
-                // cannot proceed despite the Once not running more than once.
-                POISONED = true;
-            }
-
-            configure_llvm(sess);
-        });
-
-        if POISONED {
-            bug!("couldn't enable multi-threaded LLVM");
-        }
-    }
-}
-
-unsafe fn configure_llvm(sess: &Session) {
-    let mut llvm_c_strs = Vec::new();
-    let mut llvm_args = Vec::new();
-
-    {
-        let mut add = |arg: &str| {
-            let s = CString::new(arg).unwrap();
-            llvm_args.push(s.as_ptr());
-            llvm_c_strs.push(s);
-        };
-        add("rustc"); // fake program name
-        if sess.time_llvm_passes() { add("-time-passes"); }
-        if sess.print_llvm_passes() { add("-debug-pass=Structure"); }
-
-        for arg in &sess.opts.cg.llvm_args {
-            add(&(*arg));
-        }
-    }
-
-    llvm::LLVMInitializePasses();
-
-    llvm::initialize_available_targets();
-
-    llvm::LLVMRustSetLLVMOptions(llvm_args.len() as c_int,
-                                 llvm_args.as_ptr());
 }
 
 pub fn early_error(output: config::ErrorOutputType, msg: &str) -> ! {

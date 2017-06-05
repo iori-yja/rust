@@ -307,7 +307,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
                  .dep(|s| s.name("libtest"))
                  .dep(|s| s.name("tool-compiletest").target(s.host).stage(0))
                  .dep(|s| s.name("test-helpers"))
-                 .dep(|s| s.name("emulator-copy-libs"))
+                 .dep(|s| s.name("remote-copy-libs"))
                  .default(mode != "pretty") // pretty tests don't run everywhere
                  .run(move |s| {
                      check::compiletest(build, &s.compiler(), s.target, mode, dir)
@@ -346,7 +346,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
              .dep(|s| s.name("tool-compiletest").target(s.host).stage(0))
              .dep(|s| s.name("test-helpers"))
              .dep(|s| s.name("debugger-scripts"))
-             .dep(|s| s.name("emulator-copy-libs"))
+             .dep(|s| s.name("remote-copy-libs"))
              .run(move |s| check::compiletest(build, &s.compiler(), s.target,
                                          "debuginfo-gdb", "debuginfo"));
         let mut rule = rules.test("check-debuginfo", "src/test/debuginfo");
@@ -400,14 +400,14 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
     for (krate, path, _default) in krates("std") {
         rules.test(&krate.test_step, path)
              .dep(|s| s.name("libtest"))
-             .dep(|s| s.name("emulator-copy-libs"))
+             .dep(|s| s.name("remote-copy-libs"))
              .run(move |s| check::krate(build, &s.compiler(), s.target,
                                         Mode::Libstd, TestKind::Test,
                                         Some(&krate.name)));
     }
     rules.test("check-std-all", "path/to/nowhere")
          .dep(|s| s.name("libtest"))
-         .dep(|s| s.name("emulator-copy-libs"))
+         .dep(|s| s.name("remote-copy-libs"))
          .default(true)
          .run(move |s| check::krate(build, &s.compiler(), s.target,
                                     Mode::Libstd, TestKind::Test, None));
@@ -416,14 +416,14 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
     for (krate, path, _default) in krates("std") {
         rules.bench(&krate.bench_step, path)
              .dep(|s| s.name("libtest"))
-             .dep(|s| s.name("emulator-copy-libs"))
+             .dep(|s| s.name("remote-copy-libs"))
              .run(move |s| check::krate(build, &s.compiler(), s.target,
                                         Mode::Libstd, TestKind::Bench,
                                         Some(&krate.name)));
     }
     rules.bench("bench-std-all", "path/to/nowhere")
          .dep(|s| s.name("libtest"))
-         .dep(|s| s.name("emulator-copy-libs"))
+         .dep(|s| s.name("remote-copy-libs"))
          .default(true)
          .run(move |s| check::krate(build, &s.compiler(), s.target,
                                     Mode::Libstd, TestKind::Bench, None));
@@ -431,21 +431,21 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
     for (krate, path, _default) in krates("test") {
         rules.test(&krate.test_step, path)
              .dep(|s| s.name("libtest"))
-             .dep(|s| s.name("emulator-copy-libs"))
+             .dep(|s| s.name("remote-copy-libs"))
              .run(move |s| check::krate(build, &s.compiler(), s.target,
                                         Mode::Libtest, TestKind::Test,
                                         Some(&krate.name)));
     }
     rules.test("check-test-all", "path/to/nowhere")
          .dep(|s| s.name("libtest"))
-         .dep(|s| s.name("emulator-copy-libs"))
+         .dep(|s| s.name("remote-copy-libs"))
          .default(true)
          .run(move |s| check::krate(build, &s.compiler(), s.target,
                                     Mode::Libtest, TestKind::Test, None));
     for (krate, path, _default) in krates("rustc-main") {
         rules.test(&krate.test_step, path)
              .dep(|s| s.name("librustc"))
-             .dep(|s| s.name("emulator-copy-libs"))
+             .dep(|s| s.name("remote-copy-libs"))
              .host(true)
              .run(move |s| check::krate(build, &s.compiler(), s.target,
                                         Mode::Librustc, TestKind::Test,
@@ -453,7 +453,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
     }
     rules.test("check-rustc-all", "path/to/nowhere")
          .dep(|s| s.name("librustc"))
-         .dep(|s| s.name("emulator-copy-libs"))
+         .dep(|s| s.name("remote-copy-libs"))
          .default(true)
          .host(true)
          .run(move |s| check::krate(build, &s.compiler(), s.target,
@@ -492,6 +492,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
          .host(true)
          .run(move |s| check::docs(build, &s.compiler()));
     rules.test("check-distcheck", "distcheck")
+         .dep(|s| s.name("dist-plain-source-tarball"))
          .dep(|s| s.name("dist-src"))
          .run(move |_| check::distcheck(build));
 
@@ -500,17 +501,17 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
     rules.build("openssl", "path/to/nowhere")
          .run(move |s| native::openssl(build, s.target));
 
-    // Some test suites are run inside emulators, and most of our test binaries
-    // are linked dynamically which means we need to ship the standard library
-    // and such to the emulator ahead of time. This step represents this and is
-    // a dependency of all test suites.
+    // Some test suites are run inside emulators or on remote devices, and most
+    // of our test binaries are linked dynamically which means we need to ship
+    // the standard library and such to the emulator ahead of time. This step
+    // represents this and is a dependency of all test suites.
     //
     // Most of the time this step is a noop (the `check::emulator_copy_libs`
     // only does work if necessary). For some steps such as shipping data to
     // QEMU we have to build our own tools so we've got conditional dependencies
-    // on those programs as well. Note that the QEMU client is built for the
-    // build target (us) and the server is built for the target.
-    rules.test("emulator-copy-libs", "path/to/nowhere")
+    // on those programs as well. Note that the remote test client is built for
+    // the build target (us) and the server is built for the target.
+    rules.test("remote-copy-libs", "path/to/nowhere")
          .dep(|s| s.name("libtest"))
          .dep(move |s| {
              if build.remote_tested(s.target) {
@@ -526,7 +527,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
                  Step::noop()
              }
          })
-         .run(move |s| check::emulator_copy_libs(build, &s.compiler(), s.target));
+         .run(move |s| check::remote_copy_libs(build, &s.compiler(), s.target));
 
     rules.test("check-bootstrap", "src/bootstrap")
          .default(true)
@@ -574,6 +575,10 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
          .dep(|s| s.name("maybe-clean-tools"))
          .dep(|s| s.name("libstd-tool"))
          .run(move |s| compile::tool(build, s.stage, s.target, "remote-test-client"));
+    rules.build("tool-rust-installer", "src/tools/rust-installer")
+         .dep(|s| s.name("maybe-clean-tools"))
+         .dep(|s| s.name("libstd-tool"))
+         .run(move |s| compile::tool(build, s.stage, s.target, "rust-installer"));
     rules.build("tool-cargo", "src/tools/cargo")
          .host(true)
          .default(build.config.extended)
@@ -704,6 +709,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
          .host(true)
          .only_host_build(true)
          .default(true)
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::rustc(build, s.stage, s.target));
     rules.dist("dist-std", "src/libstd")
          .dep(move |s| {
@@ -718,43 +724,54 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
          })
          .default(true)
          .only_host_build(true)
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::std(build, &s.compiler(), s.target));
     rules.dist("dist-mingw", "path/to/nowhere")
          .default(true)
          .only_host_build(true)
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| {
              if s.target.contains("pc-windows-gnu") {
                  dist::mingw(build, s.target)
              }
          });
+    rules.dist("dist-plain-source-tarball", "src")
+         .default(build.config.rust_dist_src)
+         .host(true)
+         .only_build(true)
+         .only_host_build(true)
+         .dep(move |s| tool_rust_installer(build, s))
+         .run(move |_| dist::plain_source_tarball(build));
     rules.dist("dist-src", "src")
          .default(true)
          .host(true)
          .only_build(true)
          .only_host_build(true)
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |_| dist::rust_src(build));
     rules.dist("dist-docs", "src/doc")
          .default(true)
          .only_host_build(true)
          .dep(|s| s.name("default:doc"))
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::docs(build, s.stage, s.target));
     rules.dist("dist-analysis", "analysis")
          .default(build.config.extended)
          .dep(|s| s.name("dist-std"))
          .only_host_build(true)
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::analysis(build, &s.compiler(), s.target));
     rules.dist("dist-rls", "rls")
          .host(true)
          .only_host_build(true)
          .dep(|s| s.name("tool-rls"))
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::rls(build, s.stage, s.target));
-    rules.dist("install", "path/to/nowhere")
-         .dep(|s| s.name("default:dist"))
-         .run(move |s| install::install(build, s.stage, s.target));
     rules.dist("dist-cargo", "cargo")
          .host(true)
          .only_host_build(true)
          .dep(|s| s.name("tool-cargo"))
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::cargo(build, s.stage, s.target));
     rules.dist("dist-extended", "extended")
          .default(build.config.extended)
@@ -767,6 +784,7 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
          .dep(|d| d.name("dist-cargo"))
          .dep(|d| d.name("dist-rls"))
          .dep(|d| d.name("dist-analysis"))
+         .dep(move |s| tool_rust_installer(build, s))
          .run(move |s| dist::extended(build, s.stage, s.target));
 
     rules.dist("dist-sign", "hash-and-sign")
@@ -776,8 +794,57 @@ pub fn build_rules<'a>(build: &'a Build) -> Rules {
          .dep(move |s| s.name("tool-build-manifest").target(&build.config.build).stage(0))
          .run(move |_| dist::hash_and_sign(build));
 
+    rules.install("install-docs", "src/doc")
+         .default(build.config.docs)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-docs"))
+         .run(move |s| install::Installer::new(build).install_docs(s.stage, s.target));
+    rules.install("install-std", "src/libstd")
+         .default(true)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-std"))
+         .run(move |s| install::Installer::new(build).install_std(s.stage));
+    rules.install("install-cargo", "cargo")
+         .default(build.config.extended)
+         .host(true)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-cargo"))
+         .run(move |s| install::Installer::new(build).install_cargo(s.stage, s.target));
+    rules.install("install-rls", "rls")
+         .default(build.config.extended)
+         .host(true)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-rls"))
+         .run(move |s| install::Installer::new(build).install_rls(s.stage, s.target));
+    rules.install("install-analysis", "analysis")
+         .default(build.config.extended)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-analysis"))
+         .run(move |s| install::Installer::new(build).install_analysis(s.stage, s.target));
+    rules.install("install-src", "src")
+         .default(build.config.extended)
+         .host(true)
+         .only_build(true)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-src"))
+         .run(move |s| install::Installer::new(build).install_src(s.stage));
+    rules.install("install-rustc", "src/librustc")
+         .default(true)
+         .host(true)
+         .only_host_build(true)
+         .dep(|s| s.name("dist-rustc"))
+         .run(move |s| install::Installer::new(build).install_rustc(s.stage, s.target));
+
     rules.verify();
     return rules;
+
+    /// Helper to depend on a stage0 build-only rust-installer tool.
+    fn tool_rust_installer<'a>(build: &'a Build, step: &Step<'a>) -> Step<'a> {
+        step.name("tool-rust-installer")
+            .host(&build.config.build)
+            .target(&build.config.build)
+            .stage(0)
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -881,6 +948,7 @@ enum Kind {
     Bench,
     Dist,
     Doc,
+    Install,
 }
 
 impl<'a> Rule<'a> {
@@ -1012,6 +1080,12 @@ impl<'a> Rules<'a> {
         self.rule(name, path, Kind::Dist)
     }
 
+    /// Same as `build`, but for `Kind::Install`.
+    fn install<'b>(&'b mut self, name: &'a str, path: &'a str)
+                -> RuleBuilder<'a, 'b> {
+        self.rule(name, path, Kind::Install)
+    }
+
     fn rule<'b>(&'b mut self,
                 name: &'a str,
                 path: &'a str,
@@ -1052,6 +1126,7 @@ invalid rule dependency graph detected, was a rule added and maybe typo'd?
             "test" => Kind::Test,
             "bench" => Kind::Bench,
             "dist" => Kind::Dist,
+            "install" => Kind::Install,
             _ => return None,
         };
         let rules = self.rules.values().filter(|r| r.kind == kind);
@@ -1101,13 +1176,8 @@ invalid rule dependency graph detected, was a rule added and maybe typo'd?
             Subcommand::Doc { ref paths } => (Kind::Doc, &paths[..]),
             Subcommand::Test { ref paths, test_args: _ } => (Kind::Test, &paths[..]),
             Subcommand::Bench { ref paths, test_args: _ } => (Kind::Bench, &paths[..]),
-            Subcommand::Dist { ref paths, install } => {
-                if install {
-                    return vec![self.sbuild.name("install")]
-                } else {
-                    (Kind::Dist, &paths[..])
-                }
-            }
+            Subcommand::Dist { ref paths } => (Kind::Dist, &paths[..]),
+            Subcommand::Install { ref paths } => (Kind::Install, &paths[..]),
             Subcommand::Clean => panic!(),
         };
 
@@ -1325,10 +1395,6 @@ mod tests {
     use Build;
     use config::Config;
     use flags::Flags;
-
-    macro_rules! a {
-        ($($a:expr),*) => (vec![$($a.to_string()),*])
-    }
 
     fn build(args: &[&str],
              extra_host: &[&str],

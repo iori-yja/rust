@@ -39,9 +39,6 @@
 //! These methods return true to indicate that the visitor has found what it is looking for
 //! and does not need to visit anything else.
 
-use middle::region;
-use ty::subst::Substs;
-use ty::adjustment;
 use ty::{self, Binder, Ty, TyCtxt, TypeFlags};
 
 use std::fmt;
@@ -139,33 +136,8 @@ pub trait TypeFolder<'gcx: 'tcx, 'tcx> : Sized {
         t.super_fold_with(self)
     }
 
-    fn fold_mt(&mut self, t: &ty::TypeAndMut<'tcx>) -> ty::TypeAndMut<'tcx> {
-        t.super_fold_with(self)
-    }
-
-    fn fold_impl_header(&mut self, imp: &ty::ImplHeader<'tcx>) -> ty::ImplHeader<'tcx> {
-        imp.super_fold_with(self)
-    }
-
-    fn fold_substs(&mut self,
-                   substs: &'tcx Substs<'tcx>)
-                   -> &'tcx Substs<'tcx> {
-        substs.super_fold_with(self)
-    }
-
-    fn fold_fn_sig(&mut self,
-                   sig: &ty::FnSig<'tcx>)
-                   -> ty::FnSig<'tcx> {
-        sig.super_fold_with(self)
-    }
-
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         r.super_fold_with(self)
-    }
-
-    fn fold_autoref(&mut self, ar: &adjustment::AutoBorrow<'tcx>)
-                    -> adjustment::AutoBorrow<'tcx> {
-        ar.super_fold_with(self)
     }
 }
 
@@ -324,23 +296,6 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         let mut replacer = RegionReplacer::new(self, &mut f);
         let result = value.skip_binder().fold_with(&mut replacer);
         (result, replacer.map)
-    }
-
-
-    /// Replace any late-bound regions bound in `value` with free variants attached to scope-id
-    /// `scope_id`.
-    pub fn liberate_late_bound_regions<T>(self,
-        all_outlive_scope: Option<region::CodeExtent<'tcx>>,
-        value: &Binder<T>)
-        -> T
-        where T : TypeFoldable<'tcx>
-    {
-        self.replace_late_bound_regions(value, |br| {
-            self.mk_region(ty::ReFree(ty::FreeRegion {
-                scope: all_outlive_scope,
-                bound_region: br
-            }))
-        }).0
     }
 
     /// Flattens two binding levels into one. So `for<'a> for<'b> Foo`
@@ -554,7 +509,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 // regions. See comment on `shift_regions_through_binders` method in
 // `subst.rs` for more details.
 
-pub fn shift_region<'tcx>(region: ty::RegionKind<'tcx>, amount: u32) -> ty::RegionKind<'tcx> {
+pub fn shift_region(region: ty::RegionKind, amount: u32) -> ty::RegionKind {
     match region {
         ty::ReLateBound(debruijn, br) => {
             ty::ReLateBound(debruijn.shifted(amount), br)
@@ -643,9 +598,8 @@ struct HasTypeFlagsVisitor {
 
 impl<'tcx> TypeVisitor<'tcx> for HasTypeFlagsVisitor {
     fn visit_ty(&mut self, t: Ty) -> bool {
-        let flags = t.flags.get();
-        debug!("HasTypeFlagsVisitor: t={:?} t.flags={:?} self.flags={:?}", t, flags, self.flags);
-        flags.intersects(self.flags)
+        debug!("HasTypeFlagsVisitor: t={:?} t.flags={:?} self.flags={:?}", t, t.flags, self.flags);
+        t.flags.intersects(self.flags)
     }
 
     fn visit_region(&mut self, r: ty::Region<'tcx>) -> bool {

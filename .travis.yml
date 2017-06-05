@@ -1,4 +1,4 @@
-language: minimal
+language: generic
 sudo: required
 dist: trusty
 services:
@@ -63,7 +63,7 @@ matrix:
       os: osx
       osx_image: xcode8.2
       install: &osx_install_sccache >
-        travis_retry curl -o /usr/local/bin/sccache https://s3.amazonaws.com/rust-lang-ci/rust-ci-mirror/2017-04-29-sccache-x86_64-apple-darwin &&
+        travis_retry curl -o /usr/local/bin/sccache https://s3.amazonaws.com/rust-lang-ci/rust-ci-mirror/2017-05-12-sccache-x86_64-apple-darwin &&
           chmod +x /usr/local/bin/sccache &&
         travis_retry curl -o /usr/local/bin/stamp https://s3.amazonaws.com/rust-lang-ci/rust-ci-mirror/2017-03-17-stamp-x86_64-apple-darwin &&
           chmod +x /usr/local/bin/stamp
@@ -152,19 +152,20 @@ before_script:
       echo "#### Disk usage before running script:";
       df -h;
       du . | sort -nr | head -n100
-
-script:
   - >
       if [ "$ALLOW_PR" = "" ] && [ "$TRAVIS_BRANCH" != "auto" ]; then
-          echo skipping, not a full build
+          export RUN_SCRIPT="echo 'skipping, not a full build'";
       else
-          stamp src/ci/init_repo.sh . "$HOME/rustsrc" &&
+          RUN_SCRIPT="stamp src/ci/init_repo.sh . $HOME/rustsrc";
           if [ "$TRAVIS_OS_NAME" = "osx" ]; then
-              stamp src/ci/run.sh;
+              export RUN_SCRIPT="$RUN_SCRIPT && stamp src/ci/run.sh";
           else
-              stamp src/ci/docker/run.sh $IMAGE;
+              export RUN_SCRIPT="$RUN_SCRIPT && stamp src/ci/docker/run.sh $IMAGE";
           fi
       fi
+
+script:
+  - sh -x -c "$RUN_SCRIPT"
 
 after_success:
   - >
@@ -194,7 +195,7 @@ after_failure:
 
 # Save tagged docker images we created and load them if they're available
 # Travis saves caches whether the build failed or not, nuke rustsrc if
-# the failure was while updating it (as it may be in an bad state)
+# the failure was while updating it (as it may be in a bad state)
 # https://github.com/travis-ci/travis-ci/issues/4472
 before_cache:
   - docker history -q rust-ci |

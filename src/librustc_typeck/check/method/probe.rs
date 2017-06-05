@@ -371,7 +371,13 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
 
     fn push_inherent_candidate(&mut self, xform_self_ty: Ty<'tcx>, item: ty::AssociatedItem,
                                kind: CandidateKind<'tcx>, import_id: Option<ast::NodeId>) {
-        if self.tcx.vis_is_accessible_from(item.vis, self.body_id) {
+        let is_accessible = if let LookingFor::MethodName(name) = self.looking_for {
+            let def_scope = self.tcx.adjust(name, item.container.id(), self.body_id).1;
+            item.vis.is_accessible_from(def_scope, self.tcx)
+        } else {
+            true
+        };
+        if is_accessible {
             self.inherent_candidates.push(Candidate { xform_self_ty, item, kind, import_id });
         } else if self.private_candidate.is_none() {
             self.private_candidate = Some(item.def());
@@ -380,7 +386,13 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
 
     fn push_extension_candidate(&mut self, xform_self_ty: Ty<'tcx>, item: ty::AssociatedItem,
                                kind: CandidateKind<'tcx>, import_id: Option<ast::NodeId>) {
-        if self.tcx.vis_is_accessible_from(item.vis, self.body_id) {
+        let is_accessible = if let LookingFor::MethodName(name) = self.looking_for {
+            let def_scope = self.tcx.adjust(name, item.container.id(), self.body_id).1;
+            item.vis.is_accessible_from(def_scope, self.tcx)
+        } else {
+            true
+        };
+        if is_accessible {
             self.extension_candidates.push(Candidate { xform_self_ty, item, kind, import_id });
         } else if self.private_candidate.is_none() {
             self.private_candidate = Some(item.def());
@@ -528,7 +540,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
             let cause = traits::ObligationCause::misc(self.span, self.body_id);
             let mut selcx = &mut traits::SelectionContext::new(self.fcx);
             let traits::Normalized { value: xform_self_ty, obligations } =
-                traits::normalize(selcx, cause, &xform_self_ty);
+                traits::normalize(selcx, self.param_env, cause, &xform_self_ty);
             debug!("assemble_inherent_impl_probe: xform_self_ty = {:?}",
                    xform_self_ty);
 
@@ -566,7 +578,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                                                param_ty: ty::ParamTy) {
         // FIXME -- Do we want to commit to this behavior for param bounds?
 
-        let bounds: Vec<_> = self.parameter_environment
+        let bounds: Vec<_> = self.param_env
             .caller_bounds
             .iter()
             .filter_map(|predicate| {
@@ -667,7 +679,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                     let output = fty.output().subst(self.tcx, substs);
                     let (output, _) = self.replace_late_bound_regions_with_fresh_var(
                         self.span, infer::FnCall, &output);
-                    self.can_sub_types(output, expected).is_ok()
+                    self.can_sub(self.param_env, output, expected).is_ok()
                 })
             }
             _ => false,
@@ -739,7 +751,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
             let cause = traits::ObligationCause::misc(self.span, self.body_id);
             let mut selcx = &mut traits::SelectionContext::new(self.fcx);
             let traits::Normalized { value: xform_self_ty, obligations } =
-                traits::normalize(selcx, cause, &xform_self_ty);
+                traits::normalize(selcx, self.param_env, cause, &xform_self_ty);
 
             debug!("xform_self_ty={:?}", xform_self_ty);
 
@@ -802,7 +814,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
 
             let closure_kinds = &self.tables.borrow().closure_kinds;
             let closure_kind = match closure_kinds.get(&closure_id) {
-                Some(&k) => k,
+                Some(&(k, _)) => k,
                 None => {
                     return Err(MethodError::ClosureAmbiguity(trait_def_id));
                 }
@@ -873,7 +885,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                        substs,
                        bound);
 
-                if self.can_equate(&step.self_ty, &bound.self_ty()).is_ok() {
+                if self.can_eq(self.param_env, step.self_ty, bound.self_ty()).is_ok() {
                     let xform_self_ty = self.xform_self_ty(&item, bound.self_ty(), bound.substs);
 
                     debug!("assemble_projection_candidates: bound={:?} xform_self_ty={:?}",
@@ -893,7 +905,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
         debug!("assemble_where_clause_candidates(trait_def_id={:?})",
                trait_def_id);
 
-        let caller_predicates = self.parameter_environment.caller_bounds.to_vec();
+        let caller_predicates = self.param_env.caller_bounds.to_vec();
         for poly_bound in traits::elaborate_predicates(self.tcx, caller_predicates)
             .filter_map(|p| p.to_opt_poly_trait_ref())
             .filter(|b| b.def_id() == trait_def_id) {
@@ -1131,10 +1143,8 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
 
         self.probe(|_| {
             // First check that the self type can be related.
-            let sub_obligations = match self.sub_types(false,
-                                                       &ObligationCause::dummy(),
-                                                       self_ty,
-                                                       probe.xform_self_ty) {
+            let sub_obligations = match self.at(&ObligationCause::dummy(), self.param_env)
+                                            .sup(probe.xform_self_ty, self_ty) {
                 Ok(InferOk { obligations, value: () }) => obligations,
                 Err(_) => {
                     debug!("--> cannot relate self-types");
@@ -1170,10 +1180,12 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
             let impl_bounds = self.tcx.predicates_of(impl_def_id);
             let impl_bounds = impl_bounds.instantiate(self.tcx, substs);
             let traits::Normalized { value: impl_bounds, obligations: norm_obligations } =
-                traits::normalize(selcx, cause.clone(), &impl_bounds);
+                traits::normalize(selcx, self.param_env, cause.clone(), &impl_bounds);
 
             // Convert the bounds into obligations.
-            let obligations = traits::predicates_for_generics(cause.clone(), &impl_bounds);
+            let obligations = traits::predicates_for_generics(cause.clone(),
+                                                              self.param_env,
+                                                              &impl_bounds);
             debug!("impl_obligations={:?}", obligations);
 
             // Evaluate those obligations to see if they might possibly hold.

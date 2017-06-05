@@ -156,7 +156,7 @@ fn make_place<T>() -> IntermediateBox<T> {
     let align = mem::align_of::<T>();
 
     let p = if size == 0 {
-        heap::EMPTY as *mut u8
+        mem::align_of::<T>() as *mut u8
     } else {
         let p = unsafe { heap::allocate(size, align) };
         if p.is_null() {
@@ -445,7 +445,7 @@ impl<'a> From<&'a str> for Box<str> {
     }
 }
 
-#[stable(feature = "boxed_str_conv", since = "1.18.0")]
+#[stable(feature = "boxed_str_conv", since = "1.19.0")]
 impl From<Box<str>> for Box<[u8]> {
     fn from(s: Box<str>) -> Self {
         unsafe {

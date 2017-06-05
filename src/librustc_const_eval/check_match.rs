@@ -20,7 +20,6 @@ use rustc::middle::expr_use_visitor as euv;
 use rustc::middle::mem_categorization::{cmt};
 use rustc::middle::region::RegionMaps;
 use rustc::session::Session;
-use rustc::traits::Reveal;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::lint;
 use rustc_errors::{Diagnostic, Level, DiagnosticBuilder};
@@ -46,14 +45,13 @@ impl<'a, 'tcx> Visitor<'tcx> for OuterVisitor<'a, 'tcx> {
                 b: hir::BodyId, s: Span, id: ast::NodeId) {
         intravisit::walk_fn(self, fk, fd, b, s, id);
 
-        let region_context = self.tcx.hir.local_def_id(id);
-        let region_maps = self.tcx.region_maps(region_context);
+        let def_id = self.tcx.hir.local_def_id(id);
 
         MatchVisitor {
             tcx: self.tcx,
             tables: self.tcx.body_tables(b),
-            region_maps: &region_maps,
-            param_env: &ty::ParameterEnvironment::for_item(self.tcx, id)
+            region_maps: &self.tcx.region_maps(def_id),
+            param_env: self.tcx.param_env(def_id)
         }.visit_body(self.tcx.hir.body(b));
     }
 }
@@ -70,8 +68,8 @@ fn create_e0004<'a>(sess: &'a Session, sp: Span, error_message: String) -> Diagn
 struct MatchVisitor<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     tables: &'a ty::TypeckTables<'tcx>,
-    param_env: &'a ty::ParameterEnvironment<'tcx>,
-    region_maps: &'a RegionMaps<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
+    region_maps: &'a RegionMaps,
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for MatchVisitor<'a, 'tcx> {
@@ -155,7 +153,7 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
             }
         }
 
-        let module = self.tcx.hir.local_def_id(self.tcx.hir.get_module_parent(scrut.id));
+        let module = self.tcx.hir.get_module_parent(scrut.id);
         MatchCheckCtxt::create_and_enter(self.tcx, module, |ref mut cx| {
             let mut have_errors = false;
 
@@ -183,7 +181,7 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
             // Then, if the match has no arms, check whether the scrutinee
             // is uninhabited.
             let pat_ty = self.tables.node_id_to_type(scrut.id);
-            let module = self.tcx.hir.local_def_id(self.tcx.hir.get_module_parent(scrut.id));
+            let module = self.tcx.hir.get_module_parent(scrut.id);
             if inlined_arms.is_empty() {
                 let scrutinee_is_uninhabited = if self.tcx.sess.features.borrow().never_type {
                     pat_ty.is_uninhabited_from(module, self.tcx)
@@ -232,7 +230,7 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
             "local binding"
         };
 
-        let module = self.tcx.hir.local_def_id(self.tcx.hir.get_module_parent(pat.id));
+        let module = self.tcx.hir.get_module_parent(pat.id);
         MatchCheckCtxt::create_and_enter(self.tcx, module, |ref mut cx| {
             let mut patcx = PatternContext::new(self.tcx, self.tables);
             let pattern = patcx.lower_pattern(pat);
@@ -258,7 +256,7 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
                 "refutable pattern in {}: `{}` not covered",
                 origin, pattern_string
             );
-            diag.span_label(pat.span, &format!("pattern `{}` not covered", pattern_string));
+            diag.span_label(pat.span, format!("pattern `{}` not covered", pattern_string));
             diag.emit();
         });
     }
@@ -328,7 +326,7 @@ fn check_arms<'a, 'tcx>(cx: &mut MatchCheckCtxt<'a, 'tcx>,
                                 let span = first_pat.0.span;
                                 struct_span_err!(cx.tcx.sess, span, E0162,
                                                 "irrefutable if-let pattern")
-                                    .span_label(span, &format!("irrefutable pattern"))
+                                    .span_label(span, "irrefutable pattern")
                                     .emit();
                                 printed_if_let_err = true;
                             }
@@ -355,7 +353,7 @@ fn check_arms<'a, 'tcx>(cx: &mut MatchCheckCtxt<'a, 'tcx>,
                                 1 => {
                                     struct_span_err!(cx.tcx.sess, span, E0165,
                                                      "irrefutable while-let pattern")
-                                        .span_label(span, &format!("irrefutable pattern"))
+                                        .span_label(span, "irrefutable pattern")
                                         .emit();
                                 },
                                 _ => bug!(),
@@ -369,7 +367,7 @@ fn check_arms<'a, 'tcx>(cx: &mut MatchCheckCtxt<'a, 'tcx>,
                             diagnostic.set_span(pat.span);
                             // if we had a catchall pattern, hint at that
                             if let Some(catchall) = catchall {
-                                diagnostic.span_label(pat.span, &"this is an unreachable pattern");
+                                diagnostic.span_label(pat.span, "this is an unreachable pattern");
                                 diagnostic.span_note(catchall, "this pattern matches any value");
                             }
                             cx.tcx.sess.add_lint_diagnostic(lint::builtin::UNREACHABLE_PATTERNS,
@@ -426,7 +424,7 @@ fn check_exhaustive<'a, 'tcx>(cx: &mut MatchCheckCtxt<'a, 'tcx>,
                         "refutable pattern in `for` loop binding: \
                                 `{}` not covered",
                                 pattern_string)
-                        .span_label(sp, &format!("pattern `{}` not covered", pattern_string))
+                        .span_label(sp, format!("pattern `{}` not covered", pattern_string))
                         .emit();
                 },
                 _ => {
@@ -453,7 +451,7 @@ fn check_exhaustive<'a, 'tcx>(cx: &mut MatchCheckCtxt<'a, 'tcx>,
                     create_e0004(cx.tcx.sess, sp,
                                  format!("non-exhaustive patterns: {} not covered",
                                          joined_patterns))
-                        .span_label(sp, &label_text)
+                        .span_label(sp, label_text)
                         .emit();
                 },
             }
@@ -485,18 +483,18 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
         if sub.map_or(false, |p| p.contains_bindings()) {
             struct_span_err!(cx.tcx.sess, p.span, E0007,
                              "cannot bind by-move with sub-bindings")
-                .span_label(p.span, &format!("binds an already bound by-move value by moving it"))
+                .span_label(p.span, "binds an already bound by-move value by moving it")
                 .emit();
         } else if has_guard {
             struct_span_err!(cx.tcx.sess, p.span, E0008,
                       "cannot bind by-move into a pattern guard")
-                .span_label(p.span, &format!("moves value into pattern guard"))
+                .span_label(p.span, "moves value into pattern guard")
                 .emit();
         } else if by_ref_span.is_some() {
             struct_span_err!(cx.tcx.sess, p.span, E0009,
                             "cannot bind by-move and by-ref in the same pattern")
-                    .span_label(p.span, &format!("by-move pattern here"))
-                    .span_label(by_ref_span.unwrap(), &format!("both by-ref and by-move used"))
+                    .span_label(p.span, "by-move pattern here")
+                    .span_label(by_ref_span.unwrap(), "both by-ref and by-move used")
                     .emit();
         }
     };
@@ -519,11 +517,11 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
 ///
 /// FIXME: this should be done by borrowck.
 fn check_for_mutation_in_guard(cx: &MatchVisitor, guard: &hir::Expr) {
-    cx.tcx.infer_ctxt((cx.tables, cx.param_env.clone()), Reveal::UserFacing).enter(|infcx| {
+    cx.tcx.infer_ctxt(cx.tables).enter(|infcx| {
         let mut checker = MutationChecker {
             cx: cx,
         };
-        ExprUseVisitor::new(&mut checker, cx.region_maps, &infcx).walk_expr(guard);
+        ExprUseVisitor::new(&mut checker, cx.region_maps, &infcx, cx.param_env).walk_expr(guard);
     });
 }
 
@@ -546,7 +544,7 @@ impl<'a, 'gcx, 'tcx> Delegate<'tcx> for MutationChecker<'a, 'gcx> {
             ty::MutBorrow => {
                 struct_span_err!(self.cx.tcx.sess, span, E0301,
                           "cannot mutably borrow in a pattern guard")
-                    .span_label(span, &format!("borrowed mutably in pattern guard"))
+                    .span_label(span, "borrowed mutably in pattern guard")
                     .emit();
             }
             ty::ImmBorrow | ty::UniqueImmBorrow => {}
@@ -557,7 +555,7 @@ impl<'a, 'gcx, 'tcx> Delegate<'tcx> for MutationChecker<'a, 'gcx> {
         match mode {
             MutateMode::JustWrite | MutateMode::WriteAndRead => {
                 struct_span_err!(self.cx.tcx.sess, span, E0302, "cannot assign in a pattern guard")
-                    .span_label(span, &format!("assignment in pattern guard"))
+                    .span_label(span, "assignment in pattern guard")
                     .emit();
             }
             MutateMode::Init => {}
@@ -588,7 +586,7 @@ impl<'a, 'b, 'tcx, 'v> Visitor<'v> for AtBindingPatternVisitor<'a, 'b, 'tcx> {
                 if !self.bindings_allowed {
                     struct_span_err!(self.cx.tcx.sess, pat.span, E0303,
                                      "pattern bindings are not allowed after an `@`")
-                        .span_label(pat.span,  &format!("not allowed after `@`"))
+                        .span_label(pat.span,  "not allowed after `@`")
                         .emit();
                 }
 

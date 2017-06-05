@@ -8,8 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use dep_graph::{DepGraph, DepNode, DepTrackingMap, DepTrackingMapConfig};
-use hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
+use dep_graph::{DepNode, DepTrackingMapConfig};
+use hir::def_id::{CrateNum, CRATE_DEF_INDEX, DefId, LOCAL_CRATE};
 use hir::def::Def;
 use hir;
 use middle::const_val;
@@ -18,22 +18,28 @@ use middle::region::RegionMaps;
 use mir;
 use mir::transform::{MirSuite, MirPassIndex};
 use session::CompileResult;
+use traits::specialization_graph;
 use ty::{self, CrateInherentImpls, Ty, TyCtxt};
+use ty::layout::{Layout, LayoutError};
 use ty::item_path;
 use ty::steal::Steal;
 use ty::subst::Substs;
+use ty::fast_reject::SimplifiedType;
 use util::nodemap::{DefIdSet, NodeSet};
 
 use rustc_data_structures::indexed_vec::IndexVec;
+use rustc_data_structures::fx::FxHashMap;
 use std::cell::{RefCell, RefMut};
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::mem;
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::rc::Rc;
 use syntax_pos::{Span, DUMMY_SP};
 use syntax::attr;
+use syntax::ast;
 use syntax::symbol::Symbol;
 
 pub trait Key: Clone + Hash + Eq + Debug {
@@ -97,6 +103,15 @@ impl Key for (CrateNum, DefId) {
     }
 }
 
+impl Key for (DefId, SimplifiedType) {
+    fn map_crate(&self) -> CrateNum {
+        self.0.krate
+    }
+    fn default_span(&self, tcx: TyCtxt) -> Span {
+        self.0.default_span(tcx)
+    }
+}
+
 impl<'tcx> Key for (DefId, &'tcx Substs<'tcx>) {
     fn map_crate(&self) -> CrateNum {
         self.0.krate
@@ -121,6 +136,15 @@ impl Key for (MirSuite, MirPassIndex, DefId) {
     }
     fn default_span(&self, tcx: TyCtxt) -> Span {
         self.2.default_span(tcx)
+    }
+}
+
+impl<'tcx, T: Clone + Hash + Eq + Debug> Key for ty::ParamEnvAnd<'tcx, T> {
+    fn map_crate(&self) -> CrateNum {
+        LOCAL_CRATE
+    }
+    fn default_span(&self, _: TyCtxt) -> Span {
+        DUMMY_SP
     }
 }
 
@@ -159,6 +183,20 @@ impl<'tcx> Value<'tcx> for ty::SymbolName {
     }
 }
 
+struct QueryMap<D: QueryDescription> {
+    phantom: PhantomData<D>,
+    map: FxHashMap<D::Key, D::Value>,
+}
+
+impl<M: QueryDescription> QueryMap<M> {
+    fn new() -> QueryMap<M> {
+        QueryMap {
+            phantom: PhantomData,
+            map: FxHashMap(),
+        }
+    }
+}
+
 pub struct CycleError<'a, 'tcx: 'a> {
     span: Span,
     cycle: RefMut<'a, [(Span, Query<'tcx>)]>,
@@ -181,7 +219,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             let mut err =
                 struct_span_err!(self.sess, span, E0391,
                                  "unsupported cyclic reference between types/traits detected");
-            err.span_label(span, &format!("cyclic reference"));
+            err.span_label(span, "cyclic reference");
 
             err.span_note(stack[0].0, &format!("the cycle begins when {}...",
                                                stack[0].1.describe(self)));
@@ -232,6 +270,36 @@ impl<M: DepTrackingMapConfig<Key=DefId>> QueryDescription for M {
     }
 }
 
+impl<'tcx> QueryDescription for queries::is_copy_raw<'tcx> {
+    fn describe(_tcx: TyCtxt, env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> String {
+        format!("computing whether `{}` is `Copy`", env.value)
+    }
+}
+
+impl<'tcx> QueryDescription for queries::is_sized_raw<'tcx> {
+    fn describe(_tcx: TyCtxt, env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> String {
+        format!("computing whether `{}` is `Sized`", env.value)
+    }
+}
+
+impl<'tcx> QueryDescription for queries::is_freeze_raw<'tcx> {
+    fn describe(_tcx: TyCtxt, env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> String {
+        format!("computing whether `{}` is freeze", env.value)
+    }
+}
+
+impl<'tcx> QueryDescription for queries::needs_drop_raw<'tcx> {
+    fn describe(_tcx: TyCtxt, env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> String {
+        format!("computing whether `{}` needs drop", env.value)
+    }
+}
+
+impl<'tcx> QueryDescription for queries::layout_raw<'tcx> {
+    fn describe(_tcx: TyCtxt, env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> String {
+        format!("computing layout of `{}`", env.value)
+    }
+}
+
 impl<'tcx> QueryDescription for queries::super_predicates_of<'tcx> {
     fn describe(tcx: TyCtxt, def_id: DefId) -> String {
         format!("computing the supertraits of `{}`",
@@ -263,6 +331,12 @@ impl<'tcx> QueryDescription for queries::crate_inherent_impls<'tcx> {
 impl<'tcx> QueryDescription for queries::crate_inherent_impls_overlap_check<'tcx> {
     fn describe(_: TyCtxt, _: CrateNum) -> String {
         format!("check for overlap between inherent impls defined in this crate")
+    }
+}
+
+impl<'tcx> QueryDescription for queries::crate_variances<'tcx> {
+    fn describe(_tcx: TyCtxt, _: CrateNum) -> String {
+        format!("computing the variances for items in this crate")
     }
 }
 
@@ -334,6 +408,36 @@ impl<'tcx> QueryDescription for queries::deprecation<'tcx> {
     }
 }
 
+impl<'tcx> QueryDescription for queries::item_attrs<'tcx> {
+    fn describe(_: TyCtxt, _: DefId) -> String {
+        bug!("item_attrs")
+    }
+}
+
+impl<'tcx> QueryDescription for queries::is_exported_symbol<'tcx> {
+    fn describe(_: TyCtxt, _: DefId) -> String {
+        bug!("is_exported_symbol")
+    }
+}
+
+impl<'tcx> QueryDescription for queries::fn_arg_names<'tcx> {
+    fn describe(_: TyCtxt, _: DefId) -> String {
+        bug!("fn_arg_names")
+    }
+}
+
+impl<'tcx> QueryDescription for queries::impl_parent<'tcx> {
+    fn describe(_: TyCtxt, _: DefId) -> String {
+        bug!("impl_parent")
+    }
+}
+
+impl<'tcx> QueryDescription for queries::trait_of_item<'tcx> {
+    fn describe(_: TyCtxt, _: DefId) -> String {
+        bug!("trait_of_item")
+    }
+}
+
 impl<'tcx> QueryDescription for queries::item_body_nested_bodies<'tcx> {
     fn describe(tcx: TyCtxt, def_id: DefId) -> String {
         format!("nested item bodies of `{}`", tcx.item_path_str(def_id))
@@ -354,6 +458,24 @@ impl<'tcx> QueryDescription for queries::is_mir_available<'tcx> {
     }
 }
 
+impl<'tcx> QueryDescription for queries::trait_impls_of<'tcx> {
+    fn describe(tcx: TyCtxt, def_id: DefId) -> String {
+        format!("trait impls of `{}`", tcx.item_path_str(def_id))
+    }
+}
+
+impl<'tcx> QueryDescription for queries::relevant_trait_impls_for<'tcx> {
+    fn describe(tcx: TyCtxt, (def_id, ty): (DefId, SimplifiedType)) -> String {
+        format!("relevant impls for: `({}, {:?})`", tcx.item_path_str(def_id), ty)
+    }
+}
+
+impl<'tcx> QueryDescription for queries::is_object_safe<'tcx> {
+    fn describe(tcx: TyCtxt, def_id: DefId) -> String {
+        format!("determine object safety of trait `{}`", tcx.item_path_str(def_id))
+    }
+}
+
 macro_rules! define_maps {
     (<$tcx:tt>
      $($(#[$attr:meta])*
@@ -364,13 +486,12 @@ macro_rules! define_maps {
         }
 
         impl<$tcx> Maps<$tcx> {
-            pub fn new(dep_graph: DepGraph,
-                       providers: IndexVec<CrateNum, Providers<$tcx>>)
+            pub fn new(providers: IndexVec<CrateNum, Providers<$tcx>>)
                        -> Self {
                 Maps {
                     providers,
                     query_stack: RefCell::new(vec![]),
-                    $($name: RefCell::new(DepTrackingMap::new(dep_graph.clone()))),*
+                    $($name: RefCell::new(QueryMap::new())),*
                 }
             }
         }
@@ -422,7 +543,7 @@ macro_rules! define_maps {
                        key,
                        span);
 
-                if let Some(result) = tcx.maps.$name.borrow().get(&key) {
+                if let Some(result) = tcx.maps.$name.borrow().map.get(&key) {
                     return Ok(f(result));
                 }
 
@@ -440,21 +561,19 @@ macro_rules! define_maps {
                     provider(tcx.global_tcx(), key)
                 })?;
 
-                Ok(f(tcx.maps.$name.borrow_mut().entry(key).or_insert(result)))
+                Ok(f(tcx.maps.$name.borrow_mut().map.entry(key).or_insert(result)))
             }
 
             pub fn try_get(tcx: TyCtxt<'a, $tcx, 'lcx>, span: Span, key: $K)
                            -> Result<$V, CycleError<'a, $tcx>> {
+                // We register the `read` here, but not in `force`, since
+                // `force` does not give access to the value produced (and thus
+                // we actually don't read it).
+                tcx.dep_graph.read(Self::to_dep_node(&key));
                 Self::try_get_with(tcx, span, key, Clone::clone)
             }
 
             pub fn force(tcx: TyCtxt<'a, $tcx, 'lcx>, span: Span, key: $K) {
-                // FIXME(eddyb) Move away from using `DepTrackingMap`
-                // so we don't have to explicitly ignore a false edge:
-                // we can't observe a value dependency, only side-effects,
-                // through `force`, and once everything has been updated,
-                // perhaps only diagnostics, if those, will remain.
-                let _ignore = tcx.dep_graph.in_ignore();
                 match Self::try_get_with(tcx, span, key, |_| ()) {
                     Ok(()) => {}
                     Err(e) => tcx.report_cycle(e)
@@ -545,19 +664,7 @@ macro_rules! define_map_struct {
             tcx: $tcx,
             input: $input,
             output: ($($output)*
-                     $(#[$attr])* $($pub)* $name: RefCell<DepTrackingMap<queries::$name<$tcx>>>,)
-        }
-    };
-
-    // Detect things with the `pub` modifier
-    (tcx: $tcx:tt,
-     input: (([pub $($other_modifiers:tt)*] $attrs:tt $name:tt) $($input:tt)*),
-     output: $output:tt) => {
-        define_map_struct! {
-            tcx: $tcx,
-            ready: ([pub] $attrs $name),
-            input: ($($input)*),
-            output: $output
+                     $(#[$attr])* $($pub)* $name: RefCell<QueryMap<queries::$name<$tcx>>>,)
         }
     };
 
@@ -567,7 +674,7 @@ macro_rules! define_map_struct {
      output: $output:tt) => {
         define_map_struct! {
             tcx: $tcx,
-            ready: ([pub] $attrs $name),
+            ready: ([] $attrs $name),
             input: ($($input)*),
             output: $output
         }
@@ -687,9 +794,16 @@ define_maps! { <'tcx>
     /// True if this is a foreign item (i.e., linked via `extern { ... }`).
     [] is_foreign_item: IsForeignItem(DefId) -> bool,
 
+    /// True if this is a default impl (aka impl Foo for ..)
+    [] is_default_impl: ItemSignature(DefId) -> bool,
+
+    /// Get a map with the variance of every item; use `item_variance`
+    /// instead.
+    [] crate_variances: crate_variances(CrateNum) -> Rc<ty::CrateVariancesMap>,
+
     /// Maps from def-id of a type or region parameter to its
     /// (inferred) variance.
-    [pub] variances_of: ItemSignature(DefId) -> Rc<Vec<ty::Variance>>,
+    [] variances_of: ItemVariances(DefId) -> Rc<Vec<ty::Variance>>,
 
     /// Maps from an impl/trait def-id to a list of the def-ids of its items
     [] associated_item_def_ids: AssociatedItemDefIds(DefId) -> Rc<Vec<DefId>>,
@@ -772,7 +886,7 @@ define_maps! { <'tcx>
     /// Per-function `RegionMaps`. The `DefId` should be the owner-def-id for the fn body;
     /// in the case of closures or "inline" expressions, this will be redirected to the enclosing
     /// fn item.
-    [] region_maps: RegionMaps(DefId) -> Rc<RegionMaps<'tcx>>,
+    [] region_maps: RegionMaps(DefId) -> Rc<RegionMaps>,
 
     [] mir_shims: mir_shim_dep_node(ty::InstanceDef<'tcx>) -> &'tcx mir::Mir<'tcx>,
 
@@ -783,9 +897,38 @@ define_maps! { <'tcx>
     [] def_span: DefSpan(DefId) -> Span,
     [] stability: Stability(DefId) -> Option<attr::Stability>,
     [] deprecation: Deprecation(DefId) -> Option<attr::Deprecation>,
-    [] item_body_nested_bodies: metadata_dep_node(DefId) -> Rc<BTreeMap<hir::BodyId, hir::Body>>,
-    [] const_is_rvalue_promotable_to_static: metadata_dep_node(DefId) -> bool,
-    [] is_mir_available: metadata_dep_node(DefId) -> bool,
+    [] item_attrs: ItemAttrs(DefId) -> Rc<[ast::Attribute]>,
+    [] fn_arg_names: FnArgNames(DefId) -> Vec<ast::Name>,
+    [] impl_parent: ImplParent(DefId) -> Option<DefId>,
+    [] trait_of_item: TraitOfItem(DefId) -> Option<DefId>,
+    [] is_exported_symbol: IsExportedSymbol(DefId) -> bool,
+    [] item_body_nested_bodies: ItemBodyNestedBodies(DefId) -> Rc<BTreeMap<hir::BodyId, hir::Body>>,
+    [] const_is_rvalue_promotable_to_static: ConstIsRvaluePromotableToStatic(DefId) -> bool,
+    [] is_mir_available: IsMirAvailable(DefId) -> bool,
+
+    [] trait_impls_of: TraitImpls(DefId) -> ty::trait_def::TraitImpls,
+    // Note that TraitDef::for_each_relevant_impl() will do type simplication for you.
+    [] relevant_trait_impls_for: relevant_trait_impls_for((DefId, SimplifiedType))
+        -> ty::trait_def::TraitImpls,
+    [] specialization_graph_of: SpecializationGraph(DefId) -> Rc<specialization_graph::Graph>,
+    [] is_object_safe: ObjectSafety(DefId) -> bool,
+
+    // Get the ParameterEnvironment for a given item; this environment
+    // will be in "user-facing" mode, meaning that it is suitabe for
+    // type-checking etc, and it does not normalize specializable
+    // associated types. This is almost always what you want,
+    // unless you are doing MIR optimizations, in which case you
+    // might want to use `reveal_all()` method to change modes.
+    [] param_env: ParamEnv(DefId) -> ty::ParamEnv<'tcx>,
+
+    // Trait selection queries. These are best used by invoking `ty.moves_by_default()`,
+    // `ty.is_copy()`, etc, since that will prune the environment where possible.
+    [] is_copy_raw: is_copy_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
+    [] is_sized_raw: is_sized_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
+    [] is_freeze_raw: is_freeze_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
+    [] needs_drop_raw: needs_drop_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
+    [] layout_raw: layout_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>)
+                                  -> Result<&'tcx Layout, LayoutError<'tcx>>,
 }
 
 fn coherent_trait_dep_node((_, def_id): (CrateNum, DefId)) -> DepNode<DefId> {
@@ -798,10 +941,6 @@ fn crate_inherent_impls_dep_node(_: CrateNum) -> DepNode<DefId> {
 
 fn reachability_dep_node(_: CrateNum) -> DepNode<DefId> {
     DepNode::Reachability
-}
-
-fn metadata_dep_node(def_id: DefId) -> DepNode<DefId> {
-    DepNode::MetaData(def_id)
 }
 
 fn mir_shim_dep_node(instance: ty::InstanceDef) -> DepNode<DefId> {
@@ -824,4 +963,42 @@ fn const_eval_dep_node((def_id, _): (DefId, &Substs)) -> DepNode<DefId> {
 
 fn mir_keys(_: CrateNum) -> DepNode<DefId> {
     DepNode::MirKeys
+}
+
+fn crate_variances(_: CrateNum) -> DepNode<DefId> {
+    DepNode::CrateVariances
+}
+
+fn relevant_trait_impls_for((def_id, _): (DefId, SimplifiedType)) -> DepNode<DefId> {
+    DepNode::TraitImpls(def_id)
+}
+
+fn is_copy_dep_node<'tcx>(key: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> DepNode<DefId> {
+    let def_id = ty::item_path::characteristic_def_id_of_type(key.value)
+        .unwrap_or(DefId::local(CRATE_DEF_INDEX));
+    DepNode::IsCopy(def_id)
+}
+
+fn is_sized_dep_node<'tcx>(key: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> DepNode<DefId> {
+    let def_id = ty::item_path::characteristic_def_id_of_type(key.value)
+        .unwrap_or(DefId::local(CRATE_DEF_INDEX));
+    DepNode::IsSized(def_id)
+}
+
+fn is_freeze_dep_node<'tcx>(key: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> DepNode<DefId> {
+    let def_id = ty::item_path::characteristic_def_id_of_type(key.value)
+        .unwrap_or(DefId::local(CRATE_DEF_INDEX));
+    DepNode::IsFreeze(def_id)
+}
+
+fn needs_drop_dep_node<'tcx>(key: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> DepNode<DefId> {
+    let def_id = ty::item_path::characteristic_def_id_of_type(key.value)
+        .unwrap_or(DefId::local(CRATE_DEF_INDEX));
+    DepNode::NeedsDrop(def_id)
+}
+
+fn layout_dep_node<'tcx>(key: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> DepNode<DefId> {
+    let def_id = ty::item_path::characteristic_def_id_of_type(key.value)
+        .unwrap_or(DefId::local(CRATE_DEF_INDEX));
+    DepNode::Layout(def_id)
 }

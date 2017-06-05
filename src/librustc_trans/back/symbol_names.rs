@@ -223,7 +223,7 @@ fn compute_symbol_name<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, instance: Instance
             _ => false
         }
     } else {
-        tcx.sess.cstore.is_foreign_item(def_id)
+        tcx.is_foreign_item(def_id)
     };
 
     if let Some(name) = weak_lang_items::link_name(&attrs) {
@@ -346,16 +346,6 @@ impl ItemPathBuffer for SymbolPathBuffer {
         }
         self.result.push_str(&self.temp_buf);
     }
-}
-
-pub fn exported_name_from_type_and_prefix<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                                    t: Ty<'tcx>,
-                                                    prefix: &str)
-                                                    -> String {
-    let hash = get_symbol_hash(tcx, None, t, None);
-    let mut buffer = SymbolPathBuffer::new();
-    buffer.push(prefix);
-    buffer.finish(hash)
 }
 
 // Name sanitation. LLVM will happily accept identifiers with weird names, but

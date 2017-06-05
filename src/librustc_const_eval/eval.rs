@@ -74,7 +74,7 @@ pub fn lookup_const_by_id<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 // constants, we only try to find the expression for a
                 // trait-associated const if the caller gives us the
                 // substitutions for the reference to it.
-                if tcx.sess.cstore.trait_of_item(def_id).is_some() {
+                if tcx.trait_of_item(def_id).is_some() {
                     resolve_trait_associated_const(tcx, def_id, substs)
                 } else {
                     Some((def_id, substs))
@@ -286,8 +286,7 @@ fn eval_const_expr_partial<'a, 'tcx>(cx: &ConstContext<'a, 'tcx>,
         }
       }
       hir::ExprPath(ref qpath) => {
-        let substs = cx.tables.node_id_item_substs(e.id)
-            .unwrap_or_else(|| tcx.intern_substs(&[]));
+        let substs = cx.tables.node_substs(e.id);
 
         // Avoid applying substitutions if they're empty, that'd ICE.
         let substs = if cx.substs.is_empty() {
@@ -484,9 +483,11 @@ fn resolve_trait_associated_const<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     debug!("resolve_trait_associated_const: trait_ref={:?}",
            trait_ref);
 
-    tcx.infer_ctxt((), Reveal::UserFacing).enter(|infcx| {
+    tcx.infer_ctxt(()).enter(|infcx| {
+        let param_env = ty::ParamEnv::empty(Reveal::UserFacing);
         let mut selcx = traits::SelectionContext::new(&infcx);
         let obligation = traits::Obligation::new(traits::ObligationCause::dummy(),
+                                                 param_env,
                                                  trait_ref.to_poly_trait_predicate());
         let selection = match selcx.select(&obligation) {
             Ok(Some(vtable)) => vtable,

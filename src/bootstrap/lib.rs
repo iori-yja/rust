@@ -76,18 +76,21 @@ extern crate num_cpus;
 extern crate rustc_serialize;
 extern crate toml;
 
+#[cfg(unix)]
+extern crate libc;
+
 use std::cmp;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Component, PathBuf, Path};
+use std::path::{PathBuf, Path};
 use std::process::Command;
 
 use build_helper::{run_silent, run_suppressed, output, mtime};
 
-use util::{exe, libdir, add_lib_path};
+use util::{exe, libdir, add_lib_path, OutputFolder, CiEnv};
 
 mod cc;
 mod channel;
@@ -108,9 +111,21 @@ pub mod util;
 #[cfg(windows)]
 mod job;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod job {
-    pub unsafe fn setup() {}
+    use libc;
+
+    pub unsafe fn setup(build: &mut ::Build) {
+        if build.config.low_priority {
+            libc::setpriority(libc::PRIO_PGRP as _, 0, 10);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod job {
+    pub unsafe fn setup(_build: &mut ::Build) {
+    }
 }
 
 pub use config::Config;
@@ -164,6 +179,7 @@ pub struct Build {
     crates: HashMap<String, Crate>,
     is_sudo: bool,
     src_is_git: bool,
+    ci_env: CiEnv,
 }
 
 #[derive(Debug)]
@@ -196,7 +212,7 @@ pub enum Mode {
     /// output in the "stageN-rustc" directory.
     Librustc,
 
-    /// This cargo is going to some build tool, placing output in the
+    /// This cargo is going to build some tool, placing output in the
     /// "stageN-tools" directory.
     Tool,
 }
@@ -257,13 +273,14 @@ impl Build {
             lldb_python_dir: None,
             is_sudo: is_sudo,
             src_is_git: src_is_git,
+            ci_env: CiEnv::current(),
         }
     }
 
     /// Executes the entire build, as configured by the flags and configuration.
     pub fn build(&mut self) {
         unsafe {
-            job::setup();
+            job::setup(self);
         }
 
         if let Subcommand::Clean = self.flags.cmd {
@@ -285,127 +302,10 @@ impl Build {
             self.verbose(&format!("auto-detected local-rebuild {}", local_release));
             self.local_rebuild = true;
         }
-        self.verbose("updating submodules");
-        self.update_submodules();
         self.verbose("learning about cargo");
         metadata::build(self);
 
         step::run(self);
-    }
-
-    /// Updates all git submodules that we have.
-    ///
-    /// This will detect if any submodules are out of date an run the necessary
-    /// commands to sync them all with upstream.
-    fn update_submodules(&self) {
-        struct Submodule<'a> {
-            path: &'a Path,
-            state: State,
-        }
-
-        enum State {
-            // The submodule may have staged/unstaged changes
-            MaybeDirty,
-            // Or could be initialized but never updated
-            NotInitialized,
-            // The submodule, itself, has extra commits but those changes haven't been commited to
-            // the (outer) git repository
-            OutOfSync,
-        }
-
-        if !self.src_is_git || !self.config.submodules {
-            return
-        }
-        let git = || {
-            let mut cmd = Command::new("git");
-            cmd.current_dir(&self.src);
-            return cmd
-        };
-        let git_submodule = || {
-            let mut cmd = Command::new("git");
-            cmd.current_dir(&self.src).arg("submodule");
-            return cmd
-        };
-
-        // FIXME: this takes a seriously long time to execute on Windows and a
-        //        nontrivial amount of time on Unix, we should have a better way
-        //        of detecting whether we need to run all the submodule commands
-        //        below.
-        let out = output(git_submodule().arg("status"));
-        let mut submodules = vec![];
-        for line in out.lines() {
-            // NOTE `git submodule status` output looks like this:
-            //
-            // -5066b7dcab7e700844b0e2ba71b8af9dc627a59b src/liblibc
-            // +b37ef24aa82d2be3a3cc0fe89bf82292f4ca181c src/compiler-rt (remotes/origin/..)
-            //  e058ca661692a8d01f8cf9d35939dfe3105ce968 src/jemalloc (3.6.0-533-ge058ca6)
-            //
-            // The first character can be '-', '+' or ' ' and denotes the `State` of the submodule
-            // Right next to this character is the SHA-1 of the submodule HEAD
-            // And after that comes the path to the submodule
-            let path = Path::new(line[1..].split(' ').skip(1).next().unwrap());
-            let state = if line.starts_with('-') {
-                State::NotInitialized
-            } else if line.starts_with('+') {
-                State::OutOfSync
-            } else if line.starts_with(' ') {
-                State::MaybeDirty
-            } else {
-                panic!("unexpected git submodule state: {:?}", line.chars().next());
-            };
-
-            submodules.push(Submodule { path: path, state: state })
-        }
-
-        self.run(git_submodule().arg("sync"));
-
-        for submodule in submodules {
-            // If using llvm-root then don't touch the llvm submodule.
-            if submodule.path.components().any(|c| c == Component::Normal("llvm".as_ref())) &&
-                self.config.target_config.get(&self.config.build)
-                    .and_then(|c| c.llvm_config.as_ref()).is_some()
-            {
-                continue
-            }
-
-            if submodule.path.components().any(|c| c == Component::Normal("jemalloc".as_ref())) &&
-                !self.config.use_jemalloc
-            {
-                continue
-            }
-
-            // `submodule.path` is the relative path to a submodule (from the repository root)
-            // `submodule_path` is the path to a submodule from the cwd
-
-            // use `submodule.path` when e.g. executing a submodule specific command from the
-            // repository root
-            // use `submodule_path` when e.g. executing a normal git command for the submodule
-            // (set via `current_dir`)
-            let submodule_path = self.src.join(submodule.path);
-
-            match submodule.state {
-                State::MaybeDirty => {
-                    // drop staged changes
-                    self.run(git().current_dir(&submodule_path)
-                                  .args(&["reset", "--hard"]));
-                    // drops unstaged changes
-                    self.run(git().current_dir(&submodule_path)
-                                  .args(&["clean", "-fdx"]));
-                },
-                State::NotInitialized => {
-                    self.run(git_submodule().arg("init").arg(submodule.path));
-                    self.run(git_submodule().arg("update").arg(submodule.path));
-                },
-                State::OutOfSync => {
-                    // drops submodule commits that weren't reported to the (outer) git repository
-                    self.run(git_submodule().arg("update").arg(submodule.path));
-                    self.run(git().current_dir(&submodule_path)
-                                  .args(&["reset", "--hard"]));
-                    self.run(git().current_dir(&submodule_path)
-                                  .args(&["clean", "-fdx"]));
-                },
-            }
-        }
     }
 
     /// Clear out `dir` if `input` is newer.
@@ -475,11 +375,30 @@ impl Build {
              .env("RUSTDOC_REAL", self.rustdoc(compiler))
              .env("RUSTC_FLAGS", self.rustc_flags(target).join(" "));
 
-        // Tools don't get debuginfo right now, e.g. cargo and rls don't get
-        // compiled with debuginfo.
         if mode != Mode::Tool {
-             cargo.env("RUSTC_DEBUGINFO", self.config.rust_debuginfo.to_string())
-                  .env("RUSTC_DEBUGINFO_LINES", self.config.rust_debuginfo_lines.to_string());
+            // Tools don't get debuginfo right now, e.g. cargo and rls don't
+            // get compiled with debuginfo.
+            cargo.env("RUSTC_DEBUGINFO", self.config.rust_debuginfo.to_string())
+                 .env("RUSTC_DEBUGINFO_LINES", self.config.rust_debuginfo_lines.to_string())
+                 .env("RUSTC_FORCE_UNSTABLE", "1");
+
+            // Currently the compiler depends on crates from crates.io, and
+            // then other crates can depend on the compiler (e.g. proc-macro
+            // crates). Let's say, for example that rustc itself depends on the
+            // bitflags crate. If an external crate then depends on the
+            // bitflags crate as well, we need to make sure they don't
+            // conflict, even if they pick the same verison of bitflags. We'll
+            // want to make sure that e.g. a plugin and rustc each get their
+            // own copy of bitflags.
+
+            // Cargo ensures that this works in general through the -C metadata
+            // flag. This flag will frob the symbols in the binary to make sure
+            // they're different, even though the source code is the exact
+            // same. To solve this problem for the compiler we extend Cargo's
+            // already-passed -C metadata flag with our own. Our rustc.rs
+            // wrapper around the actual rustc will detect -C metadata being
+            // passed and frob it with this extra string we're passing in.
+            cargo.env("RUSTC_METADATA_SUFFIX", "rustc");
         }
 
         // Enable usage of unstable features
@@ -507,7 +426,7 @@ impl Build {
                  .env("RUSTC_SNAPSHOT_LIBDIR", self.rustc_libdir(compiler));
         }
 
-        // There are two invariants we try must maintain:
+        // There are two invariants we must maintain:
         // * stable crates cannot depend on unstable crates (general Rust rule),
         // * crates that end up in the sysroot must be unstable (rustbuild rule).
         //
@@ -521,15 +440,17 @@ impl Build {
         // feature and opt-in to `rustc_private`.
         //
         // We can't always pass `rustbuild` because crates which are outside of
-        // the comipiler, libs, and tests are stable and we don't want to make
+        // the compiler, libs, and tests are stable and we don't want to make
         // their deps unstable (since this would break the first invariant
         // above).
-        if mode != Mode::Tool {
+        //
+        // FIXME: remove this after next stage0
+        if mode != Mode::Tool && stage == 0 {
             cargo.env("RUSTBUILD_UNSTABLE", "1");
         }
 
         // Ignore incremental modes except for stage0, since we're
-        // not guaranteeing correctness acros builds if the compiler
+        // not guaranteeing correctness across builds if the compiler
         // is changing under your feet.`
         if self.flags.incremental && compiler.stage == 0 {
             let incr_dir = self.incremental_dir(compiler);
@@ -570,7 +491,7 @@ impl Build {
             cargo.env_remove("MAKEFLAGS");
         }
 
-        // Environment variables *required* needed throughout the build
+        // Environment variables *required* throughout the build
         //
         // FIXME: should update code to not require this env var
         cargo.env("CFG_COMPILER_HOST_TRIPLE", target);
@@ -588,6 +509,9 @@ impl Build {
         if self.config.vendor || self.is_sudo {
             cargo.arg("--frozen");
         }
+
+        self.ci_env.force_coloring_in_ci(&mut cargo);
+
         return cargo
     }
 
@@ -728,7 +652,7 @@ impl Build {
     }
 
     /// Returns the root output directory for all Cargo output in a given stage,
-    /// running a particular comipler, wehther or not we're building the
+    /// running a particular compiler, wehther or not we're building the
     /// standard library, and targeting the specified architecture.
     fn cargo_out(&self,
                  compiler: &Compiler,
@@ -1090,6 +1014,19 @@ impl Build {
         match &self.config.channel[..] {
             "stable" | "beta" => false,
             "nightly" | _ => true,
+        }
+    }
+
+    /// Fold the output of the commands after this method into a group. The fold
+    /// ends when the returned object is dropped. Folding can only be used in
+    /// the Travis CI environment.
+    pub fn fold_output<D, F>(&self, name: F) -> Option<OutputFolder>
+        where D: Into<String>, F: FnOnce() -> D
+    {
+        if self.ci_env == CiEnv::Travis {
+            Some(OutputFolder::new(name().into()))
+        } else {
+            None
         }
     }
 }

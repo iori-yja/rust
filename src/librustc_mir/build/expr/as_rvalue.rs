@@ -33,12 +33,12 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                              -> BlockAnd<Rvalue<'tcx>>
         where M: Mirror<'tcx, Output = Expr<'tcx>>
     {
-        let topmost_scope = self.topmost_scope(); // FIXME(#6393)
-        self.as_rvalue(block, Some(topmost_scope), expr)
+        let local_scope = self.local_scope();
+        self.as_rvalue(block, local_scope, expr)
     }
 
     /// Compile `expr`, yielding an rvalue.
-    pub fn as_rvalue<M>(&mut self, block: BasicBlock, scope: Option<CodeExtent<'tcx>>, expr: M)
+    pub fn as_rvalue<M>(&mut self, block: BasicBlock, scope: Option<CodeExtent>, expr: M)
                         -> BlockAnd<Rvalue<'tcx>>
         where M: Mirror<'tcx, Output = Expr<'tcx>>
     {
@@ -48,10 +48,10 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
     fn expr_as_rvalue(&mut self,
                       mut block: BasicBlock,
-                      scope: Option<CodeExtent<'tcx>>,
+                      scope: Option<CodeExtent>,
                       expr: Expr<'tcx>)
                       -> BlockAnd<Rvalue<'tcx>> {
-        debug!("expr_as_rvalue(block={:?}, expr={:?})", block, expr);
+        debug!("expr_as_rvalue(block={:?}, scope={:?}, expr={:?})", block, scope, expr);
 
         let this = self;
         let expr_span = expr.span;
@@ -97,7 +97,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 let value = this.hir.mirror(value);
                 let result = this.temp(expr.ty, expr_span);
                 // to start, malloc some memory of suitable type (thus far, uninitialized):
-                this.cfg.push_assign(block, source_info, &result, Rvalue::Box(value.ty));
+                let box_ = Rvalue::NullaryOp(NullOp::Box, value.ty);
+                this.cfg.push_assign(block, source_info, &result, box_);
                 this.in_scope(value_extents, block, |this| {
                     // schedule a shallow free of that memory, lest we unwind:
                     this.schedule_box_free(expr_span, value_extents, &result, value.ty);
@@ -166,7 +167,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                           .map(|f| unpack!(block = this.as_operand(block, scope, f)))
                           .collect();
 
-                block.and(Rvalue::Aggregate(AggregateKind::Array(el_ty), fields))
+                block.and(Rvalue::Aggregate(box AggregateKind::Array(el_ty), fields))
             }
             ExprKind::Tuple { fields } => { // see (*) above
                 // first process the set of fields
@@ -175,14 +176,14 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                           .map(|f| unpack!(block = this.as_operand(block, scope, f)))
                           .collect();
 
-                block.and(Rvalue::Aggregate(AggregateKind::Tuple, fields))
+                block.and(Rvalue::Aggregate(box AggregateKind::Tuple, fields))
             }
             ExprKind::Closure { closure_id, substs, upvars } => { // see (*) above
                 let upvars =
                     upvars.into_iter()
                           .map(|upvar| unpack!(block = this.as_operand(block, scope, upvar)))
                           .collect();
-                block.and(Rvalue::Aggregate(AggregateKind::Closure(closure_id, substs), upvars))
+                block.and(Rvalue::Aggregate(box AggregateKind::Closure(closure_id, substs), upvars))
             }
             ExprKind::Adt {
                 adt_def, variant_index, substs, fields, base
@@ -215,7 +216,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     field_names.iter().filter_map(|n| fields_map.get(n).cloned()).collect()
                 };
 
-                let adt = AggregateKind::Adt(adt_def, variant_index, substs, active_field_index);
+                let adt =
+                    box AggregateKind::Adt(adt_def, variant_index, substs, active_field_index);
                 block.and(Rvalue::Aggregate(adt, fields))
             }
             ExprKind::Assign { .. } |

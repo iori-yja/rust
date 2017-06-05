@@ -17,7 +17,7 @@ use llvm::{ValueRef, ContextRef, TypeKind};
 use llvm::{True, False, Bool, OperandBundleDef};
 use rustc::hir::def_id::DefId;
 use rustc::hir::map::DefPathData;
-use middle::lang_items::LangItem;
+use rustc::middle::lang_items::LangItem;
 use base;
 use builder::Builder;
 use consts;
@@ -188,15 +188,6 @@ impl Funclet {
 
     pub fn bundle(&self) -> &OperandBundleDef {
         &self.operand
-    }
-}
-
-impl Clone for Funclet {
-    fn clone(&self) -> Funclet {
-        Funclet {
-            cleanuppad: self.cleanuppad,
-            operand: OperandBundleDef::new("funclet", &[self.cleanuppad]),
-        }
     }
 }
 
@@ -535,6 +526,12 @@ pub fn requests_inline<'a, 'tcx>(
     instance: &ty::Instance<'tcx>
 ) -> bool {
     if is_inline_instance(tcx, instance) {
+        return true
+    }
+    if let ty::InstanceDef::DropGlue(..) = instance.def {
+        // Drop glue wants to be instantiated at every translation
+        // unit, but without an #[inline] hint. We should make this
+        // available to normal end-users.
         return true
     }
     attr::requests_inline(&instance.def.attrs(tcx)[..])

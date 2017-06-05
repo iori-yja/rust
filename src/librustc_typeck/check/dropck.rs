@@ -16,7 +16,7 @@ use rustc::infer::{self, InferOk};
 use rustc::middle::region::{self, RegionMaps};
 use rustc::ty::subst::{Subst, Substs};
 use rustc::ty::{self, Ty, TyCtxt};
-use rustc::traits::{self, ObligationCause, Reveal};
+use rustc::traits::{self, ObligationCause};
 use util::common::ErrorReported;
 use util::nodemap::FxHashSet;
 
@@ -76,17 +76,15 @@ fn ensure_drop_params_and_item_params_correspond<'a, 'tcx>(
     -> Result<(), ErrorReported>
 {
     let drop_impl_node_id = tcx.hir.as_local_node_id(drop_impl_did).unwrap();
-    let self_type_node_id = tcx.hir.as_local_node_id(self_type_did).unwrap();
 
     // check that the impl type can be made to match the trait type.
 
-    let impl_param_env = ty::ParameterEnvironment::for_item(tcx, self_type_node_id);
-    tcx.infer_ctxt(impl_param_env, Reveal::UserFacing).enter(|ref infcx| {
+    tcx.infer_ctxt(()).enter(|ref infcx| {
+        let impl_param_env = tcx.param_env(self_type_did);
         let tcx = infcx.tcx;
         let mut fulfillment_cx = traits::FulfillmentContext::new();
 
         let named_type = tcx.type_of(self_type_did);
-        let named_type = named_type.subst(tcx, &infcx.parameter_environment.free_substs);
 
         let drop_impl_span = tcx.def_span(drop_impl_did);
         let fresh_impl_substs =
@@ -94,12 +92,12 @@ fn ensure_drop_params_and_item_params_correspond<'a, 'tcx>(
         let fresh_impl_self_ty = drop_impl_ty.subst(tcx, fresh_impl_substs);
 
         let cause = &ObligationCause::misc(drop_impl_span, drop_impl_node_id);
-        match infcx.eq_types(true, cause, named_type, fresh_impl_self_ty) {
+        match infcx.at(cause, impl_param_env).eq(named_type, fresh_impl_self_ty) {
             Ok(InferOk { obligations, .. }) => {
                 fulfillment_cx.register_predicate_obligations(infcx, obligations);
             }
             Err(_) => {
-                let item_span = tcx.hir.span(self_type_node_id);
+                let item_span = tcx.def_span(self_type_did);
                 struct_span_err!(tcx.sess, drop_impl_span, E0366,
                                  "Implementations of Drop cannot be specialized")
                     .span_note(item_span,
@@ -272,7 +270,7 @@ pub fn check_safety_of_destructor_if_necessary<'a, 'gcx, 'tcx>(
     rcx: &mut RegionCtxt<'a, 'gcx, 'tcx>,
     ty: ty::Ty<'tcx>,
     span: Span,
-    scope: region::CodeExtent<'tcx>)
+    scope: region::CodeExtent)
     -> Result<(), ErrorReported>
 {
     debug!("check_safety_of_destructor_if_necessary typ: {:?} scope: {:?}",

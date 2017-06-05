@@ -329,9 +329,11 @@ impl_stable_hash_for!(enum hir::QPath {
 
 impl_stable_hash_for!(struct hir::MacroDef {
     name,
+    vis,
     attrs,
     id,
     span,
+    legacy,
     body
 });
 
@@ -1116,7 +1118,15 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a, 'tcx>> for hir::def_id::DefIn
 }
 
 impl_stable_hash_for!(struct hir::def::Export {
-    name,
+    ident,
     def,
     span
 });
+
+impl<'a, 'tcx> HashStable<StableHashingContext<'a, 'tcx>> for ::middle::lang_items::LangItem {
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          _: &mut StableHashingContext<'a, 'tcx>,
+                                          hasher: &mut StableHasher<W>) {
+        ::std::hash::Hash::hash(self, hasher);
+    }
+}

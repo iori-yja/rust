@@ -509,12 +509,13 @@ macro_rules! make_mir_visitor {
                         self.visit_lvalue(lvalue, LvalueContext::Inspect, location);
                     }
 
-                    Rvalue::Box(ref $($mutability)* ty) => {
+                    Rvalue::NullaryOp(_op, ref $($mutability)* ty) => {
                         self.visit_ty(ty);
                     }
 
                     Rvalue::Aggregate(ref $($mutability)* kind,
                                       ref $($mutability)* operands) => {
+                        let kind = &$($mutability)* **kind;
                         match *kind {
                             AggregateKind::Array(ref $($mutability)* ty) => {
                                 self.visit_ty(ty);

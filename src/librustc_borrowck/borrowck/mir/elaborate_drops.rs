@@ -22,7 +22,7 @@ use rustc::util::nodemap::FxHashMap;
 use rustc_data_structures::indexed_set::IdxSetBuf;
 use rustc_data_structures::indexed_vec::Idx;
 use rustc_mir::util::patch::MirPatch;
-use rustc_mir::util::elaborate_drops::{DropFlagState, elaborate_drop};
+use rustc_mir::util::elaborate_drops::{DropFlagState, Unwind, elaborate_drop};
 use rustc_mir::util::elaborate_drops::{DropElaborator, DropStyle, DropFlagMode};
 use syntax::ast;
 use syntax_pos::Span;
@@ -44,8 +44,8 @@ impl MirPass for ElaborateDrops {
             _ => return
         }
         let id = src.item_id();
-        let param_env = ty::ParameterEnvironment::for_item(tcx, id);
-        let move_data = MoveData::gather_moves(mir, tcx, &param_env);
+        let param_env = tcx.param_env(tcx.hir.local_def_id(id));
+        let move_data = MoveData::gather_moves(mir, tcx, param_env);
         let elaborate_patch = {
             let mir = &*mir;
             let env = MoveDataParamEnv {
@@ -196,7 +196,7 @@ impl<'a, 'b, 'tcx> DropElaborator<'a, 'tcx> for Elaborator<'a, 'b, 'tcx> {
         self.ctxt.tcx
     }
 
-    fn param_env(&self) -> &'a ty::ParameterEnvironment<'tcx> {
+    fn param_env(&self) -> ty::ParamEnv<'tcx> {
         self.ctxt.param_env()
     }
 
@@ -289,8 +289,9 @@ struct ElaborateDropsCtxt<'a, 'tcx: 'a> {
 
 impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
     fn move_data(&self) -> &'b MoveData<'tcx> { &self.env.move_data }
-    fn param_env(&self) -> &'b ty::ParameterEnvironment<'tcx> {
-        &self.env.param_env
+
+    fn param_env(&self) -> ty::ParamEnv<'tcx> {
+        self.env.param_env
     }
 
     fn initialization_data_at(&self, loc: Location) -> InitializationData {
@@ -398,14 +399,13 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                                     ctxt: self
                                 },
                                 terminator.source_info,
-                                data.is_cleanup,
                                 location,
                                 path,
                                 target,
                                 if data.is_cleanup {
-                                    None
+                                    Unwind::InCleanup
                                 } else {
-                                    Some(Option::unwrap_or(unwind, resume_block))
+                                    Unwind::To(Option::unwrap_or(unwind, resume_block))
                                 },
                                 bb)
                         }
@@ -454,6 +454,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
         let bb = loc.block;
         let data = &self.mir[bb];
         let terminator = data.terminator();
+        assert!(!data.is_cleanup, "DropAndReplace in unwind path not supported");
 
         let assign = Statement {
             kind: StatementKind::Assign(location.clone(), Rvalue::Use(value.clone())),
@@ -476,7 +477,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                 kind: TerminatorKind::Goto { target: target },
                 ..*terminator
             }),
-            is_cleanup: data.is_cleanup,
+            is_cleanup: false,
         });
 
         match self.move_data().rev_lookup.find(location) {
@@ -490,11 +491,10 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                         ctxt: self
                     },
                     terminator.source_info,
-                    data.is_cleanup,
                     location,
                     path,
                     target,
-                    Some(unwind),
+                    Unwind::To(unwind),
                     bb);
                 on_all_children_bits(self.tcx, self.mir, self.move_data(), path, |child| {
                     self.set_drop_flag(Location { block: target, statement_index: 0 },
@@ -517,11 +517,11 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
     }
 
     fn constant_bool(&self, span: Span, val: bool) -> Rvalue<'tcx> {
-        Rvalue::Use(Operand::Constant(Constant {
+        Rvalue::Use(Operand::Constant(Box::new(Constant {
             span: span,
             ty: self.tcx.types.bool,
             literal: Literal::Value { value: ConstVal::Bool(val) }
-        }))
+        })))
     }
 
     fn set_drop_flag(&mut self, loc: Location, path: MovePathIndex, val: DropFlagState) {

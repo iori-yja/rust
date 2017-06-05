@@ -22,6 +22,7 @@ use rustc::middle::{self, dependency_format, stability, reachable};
 use rustc::middle::privacy::AccessLevels;
 use rustc::mir::transform::{MIR_CONST, MIR_VALIDATED, MIR_OPTIMIZED, Passes};
 use rustc::ty::{self, TyCtxt, Resolutions, GlobalArenas};
+use rustc::traits;
 use rustc::util::common::time;
 use rustc::util::nodemap::NodeSet;
 use rustc::util::fs::rename_or_copy_remove;
@@ -699,6 +700,8 @@ pub fn phase_2_configure_and_expand<F>(sess: &Session,
 
         let krate = ecx.monotonic_expander().expand_crate(krate);
 
+        ecx.check_unused_macros();
+
         let mut missing_fragment_specifiers: Vec<_> =
             ecx.parse_sess.missing_fragment_specifiers.borrow().iter().cloned().collect();
         missing_fragment_specifiers.sort();
@@ -882,7 +885,7 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
               "static item recursion checking",
               || static_recursion::check_crate(sess, &hir_map))?;
 
-    let index = stability::Index::new(&hir_map);
+    let index = stability::Index::new(&sess);
 
     let mut local_providers = ty::maps::Providers::default();
     borrowck::provide(&mut local_providers);
@@ -892,6 +895,7 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
     trans::provide(&mut local_providers);
     typeck::provide(&mut local_providers);
     ty::provide(&mut local_providers);
+    traits::provide(&mut local_providers);
     reachable::provide(&mut local_providers);
     rustc_const_eval::provide(&mut local_providers);
     middle::region::provide(&mut local_providers);
@@ -900,6 +904,7 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
     cstore::provide(&mut extern_providers);
     trans::provide(&mut extern_providers);
     ty::provide_extern(&mut extern_providers);
+    traits::provide_extern(&mut extern_providers);
     // FIXME(eddyb) get rid of this once we replace const_eval with miri.
     rustc_const_eval::provide(&mut extern_providers);
 
@@ -1155,8 +1160,7 @@ fn write_out_deps(sess: &Session, outputs: &OutputFilenames, crate_name: &str) {
             // Build a list of files used to compile the output and
             // write Makefile-compatible dependency rules
             let files: Vec<String> = sess.codemap()
-                                         .files
-                                         .borrow()
+                                         .files()
                                          .iter()
                                          .filter(|fmap| fmap.is_real_file())
                                          .filter(|fmap| !fmap.is_imported())

@@ -14,11 +14,10 @@ use hair::cx::Cx;
 use hair::Pattern;
 use rustc::hir;
 use rustc::hir::def_id::DefId;
-use rustc::middle::region::{CodeExtent, CodeExtentData};
+use rustc::middle::region::CodeExtent;
 use rustc::mir::*;
 use rustc::mir::transform::MirSource;
 use rustc::mir::visit::MutVisitor;
-use rustc::traits::Reveal;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::subst::Substs;
 use rustc::util::nodemap::NodeMap;
@@ -84,7 +83,7 @@ pub fn mir_build<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Mir<'t
     };
 
     let src = MirSource::from_node(tcx, id);
-    tcx.infer_ctxt(body_id, Reveal::UserFacing).enter(|infcx| {
+    tcx.infer_ctxt(body_id).enter(|infcx| {
         let cx = Cx::new(&infcx, src);
         let mut mir = if cx.tables().tainted_by_errors {
             build::construct_error(cx, body_id)
@@ -172,8 +171,7 @@ fn create_constructor_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 {
     let span = tcx.hir.span(ctor_id);
     if let hir::VariantData::Tuple(ref fields, ctor_id) = *v {
-        let pe = ty::ParameterEnvironment::for_item(tcx, ctor_id);
-        tcx.infer_ctxt(pe, Reveal::UserFacing).enter(|infcx| {
+        tcx.infer_ctxt(()).enter(|infcx| {
             let (mut mir, src) =
                 shim::build_adt_ctor(&infcx, ctor_id, fields, span);
 
@@ -206,13 +204,14 @@ fn closure_self_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                              -> Ty<'tcx> {
     let closure_ty = tcx.body_tables(body_id).node_id_to_type(closure_expr_id);
 
+    let closure_def_id = tcx.hir.local_def_id(closure_expr_id);
     let region = ty::ReFree(ty::FreeRegion {
-        scope: Some(tcx.item_extent(body_id.node_id)),
+        scope: closure_def_id,
         bound_region: ty::BoundRegion::BrEnv,
     });
     let region = tcx.mk_region(region);
 
-    match tcx.closure_kind(tcx.hir.local_def_id(closure_expr_id)) {
+    match tcx.closure_kind(closure_def_id) {
         ty::ClosureKind::Fn =>
             tcx.mk_ref(region,
                        ty::TypeAndMut { ty: closure_ty,
@@ -337,12 +336,8 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
     let span = tcx.hir.span(fn_id);
     let mut builder = Builder::new(hir.clone(), span, arguments.len(), return_ty);
 
-    let call_site_extent =
-        tcx.intern_code_extent(
-            CodeExtentData::CallSiteScope { fn_id: fn_id, body_id: body.value.id });
-    let arg_extent =
-        tcx.intern_code_extent(
-            CodeExtentData::ParameterScope { fn_id: fn_id, body_id: body.value.id });
+    let call_site_extent = CodeExtent::CallSiteScope(body.id());
+    let arg_extent = CodeExtent::ParameterScope(body.id());
     let mut block = START_BLOCK;
     unpack!(block = builder.in_scope(call_site_extent, block, |builder| {
         unpack!(block = builder.in_scope(arg_extent, block, |builder| {
@@ -395,9 +390,9 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
     mir
 }
 
-pub fn construct_const<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
-                                       body_id: hir::BodyId)
-                                       -> Mir<'tcx> {
+fn construct_const<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
+                                   body_id: hir::BodyId)
+                                   -> Mir<'tcx> {
     let tcx = hir.tcx();
     let ast_expr = &tcx.hir.body(body_id).value;
     let ty = hir.tables().expr_ty_adjusted(ast_expr);
@@ -405,27 +400,20 @@ pub fn construct_const<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
     let span = tcx.hir.span(owner_id);
     let mut builder = Builder::new(hir.clone(), span, 0, ty);
 
-    let extent = hir.region_maps.temporary_scope(tcx, ast_expr.id)
-                                .unwrap_or(tcx.item_extent(owner_id));
     let mut block = START_BLOCK;
-    let _ = builder.in_scope(extent, block, |builder| {
-        let expr = builder.hir.mirror(ast_expr);
-        unpack!(block = builder.into(&Lvalue::Local(RETURN_POINTER), block, expr));
+    let expr = builder.hir.mirror(ast_expr);
+    unpack!(block = builder.into_expr(&Lvalue::Local(RETURN_POINTER), block, expr));
 
-        let source_info = builder.source_info(span);
-        let return_block = builder.return_block();
-        builder.cfg.terminate(block, source_info,
-                              TerminatorKind::Goto { target: return_block });
-        builder.cfg.terminate(return_block, source_info,
-                              TerminatorKind::Return);
+    let source_info = builder.source_info(span);
+    builder.cfg.terminate(block, source_info, TerminatorKind::Return);
 
-        return_block.unit()
-    });
+    // Constants can't `return` so a return block should not be created.
+    assert_eq!(builder.cached_return_block, None);
 
     builder.finish(vec![], ty)
 }
 
-pub fn construct_error<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
+fn construct_error<'a, 'gcx, 'tcx>(hir: Cx<'a, 'gcx, 'tcx>,
                                        body_id: hir::BodyId)
                                        -> Mir<'tcx> {
     let span = hir.tcx().hir.span(hir.tcx().hir.body_owner(body_id));
@@ -490,7 +478,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     fn args_and_body(&mut self,
                      mut block: BasicBlock,
                      arguments: &[(Ty<'gcx>, Option<&'gcx hir::Pat>)],
-                     argument_extent: CodeExtent<'tcx>,
+                     argument_extent: CodeExtent,
                      ast_body: &'gcx hir::Expr)
                      -> BlockAnd<()>
     {

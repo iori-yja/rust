@@ -51,6 +51,24 @@ pub trait TypeRelation<'a, 'gcx: 'a+'tcx, 'tcx: 'a> : Sized {
         Relate::relate(self, a, b)
     }
 
+    /// Relate the two substitutions for the given item. The default
+    /// is to look up the variance for the item and proceed
+    /// accordingly.
+    fn relate_item_substs(&mut self,
+                          item_def_id: DefId,
+                          a_subst: &'tcx Substs<'tcx>,
+                          b_subst: &'tcx Substs<'tcx>)
+                          -> RelateResult<'tcx, &'tcx Substs<'tcx>>
+    {
+        debug!("relate_item_substs(item_def_id={:?}, a_subst={:?}, b_subst={:?})",
+               item_def_id,
+               a_subst,
+               b_subst);
+
+        let opt_variances = self.tcx().variances_of(item_def_id);
+        relate_substs(self, Some(&opt_variances), a_subst, b_subst)
+    }
+
     /// Switch variance for the purpose of relating `a` and `b`.
     fn relate_with_variance<T: Relate<'tcx>>(&mut self,
                                              variance: ty::Variance,
@@ -107,31 +125,6 @@ impl<'tcx> Relate<'tcx> for ty::TypeAndMut<'tcx> {
             Ok(ty::TypeAndMut {ty: ty, mutbl: mutbl})
         }
     }
-}
-
-// substitutions are not themselves relatable without more context,
-// but they is an important subroutine for things that ARE relatable,
-// like traits etc.
-fn relate_item_substs<'a, 'gcx, 'tcx, R>(relation: &mut R,
-                                         item_def_id: DefId,
-                                         a_subst: &'tcx Substs<'tcx>,
-                                         b_subst: &'tcx Substs<'tcx>)
-                                         -> RelateResult<'tcx, &'tcx Substs<'tcx>>
-    where R: TypeRelation<'a, 'gcx, 'tcx>, 'gcx: 'a+'tcx, 'tcx: 'a
-{
-    debug!("substs: item_def_id={:?} a_subst={:?} b_subst={:?}",
-           item_def_id,
-           a_subst,
-           b_subst);
-
-    let variances;
-    let opt_variances = if relation.tcx().variance_computed.get() {
-        variances = relation.tcx().variances_of(item_def_id);
-        Some(&*variances)
-    } else {
-        None
-    };
-    relate_substs(relation, opt_variances, a_subst, b_subst)
 }
 
 pub fn relate_substs<'a, 'gcx, 'tcx, R>(relation: &mut R,
@@ -232,12 +225,13 @@ impl<'tcx> Relate<'tcx> for ty::ProjectionTy<'tcx> {
                            -> RelateResult<'tcx, ty::ProjectionTy<'tcx>>
         where R: TypeRelation<'a, 'gcx, 'tcx>, 'gcx: 'a+'tcx, 'tcx: 'a
     {
-        if a.item_name != b.item_name {
+        let tcx = relation.tcx();
+        if a.item_name(tcx) != b.item_name(tcx) {
             Err(TypeError::ProjectionNameMismatched(
-                expected_found(relation, &a.item_name, &b.item_name)))
+                expected_found(relation, &a.item_name(tcx), &b.item_name(tcx))))
         } else {
             let trait_ref = relation.relate(&a.trait_ref, &b.trait_ref)?;
-            Ok(ty::ProjectionTy { trait_ref: trait_ref, item_name: a.item_name })
+            Ok(ty::ProjectionTy::from_ref_and_name(tcx, trait_ref, a.item_name(tcx)))
         }
     }
 }
@@ -297,7 +291,7 @@ impl<'tcx> Relate<'tcx> for ty::TraitRef<'tcx> {
         if a.def_id != b.def_id {
             Err(TypeError::Traits(expected_found(relation, &a.def_id, &b.def_id)))
         } else {
-            let substs = relate_item_substs(relation, a.def_id, a.substs, b.substs)?;
+            let substs = relation.relate_item_substs(a.def_id, a.substs, b.substs)?;
             Ok(ty::TraitRef { def_id: a.def_id, substs: substs })
         }
     }
@@ -314,7 +308,7 @@ impl<'tcx> Relate<'tcx> for ty::ExistentialTraitRef<'tcx> {
         if a.def_id != b.def_id {
             Err(TypeError::Traits(expected_found(relation, &a.def_id, &b.def_id)))
         } else {
-            let substs = relate_item_substs(relation, a.def_id, a.substs, b.substs)?;
+            let substs = relation.relate_item_substs(a.def_id, a.substs, b.substs)?;
             Ok(ty::ExistentialTraitRef { def_id: a.def_id, substs: substs })
         }
     }
@@ -378,7 +372,7 @@ pub fn super_relate_tys<'a, 'gcx, 'tcx, R>(relation: &mut R,
         (&ty::TyAdt(a_def, a_substs), &ty::TyAdt(b_def, b_substs))
             if a_def == b_def =>
         {
-            let substs = relate_item_substs(relation, a_def.did, a_substs, b_substs)?;
+            let substs = relation.relate_item_substs(a_def.did, a_substs, b_substs)?;
             Ok(tcx.mk_adt(a_def, substs))
         }
 
@@ -464,7 +458,7 @@ pub fn super_relate_tys<'a, 'gcx, 'tcx, R>(relation: &mut R,
         (&ty::TyProjection(ref a_data), &ty::TyProjection(ref b_data)) =>
         {
             let projection_ty = relation.relate(a_data, b_data)?;
-            Ok(tcx.mk_projection(projection_ty.trait_ref, projection_ty.item_name))
+            Ok(tcx.mk_projection(projection_ty.trait_ref, projection_ty.item_name(tcx)))
         }
 
         (&ty::TyAnon(a_def_id, a_substs), &ty::TyAnon(b_def_id, b_substs))

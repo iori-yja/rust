@@ -90,7 +90,7 @@ struct CheckLoanCtxt<'a, 'tcx: 'a> {
     dfcx_loans: &'a LoanDataFlow<'a, 'tcx>,
     move_data: &'a move_data::FlowedMoveData<'a, 'tcx>,
     all_loans: &'a [Loan<'tcx>],
-    param_env: &'a ty::ParameterEnvironment<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
 }
 
 impl<'a, 'tcx> euv::Delegate<'tcx> for CheckLoanCtxt<'a, 'tcx> {
@@ -191,15 +191,17 @@ pub fn check_loans<'a, 'b, 'c, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                      body: &hir::Body) {
     debug!("check_loans(body id={})", body.value.id);
 
+    let def_id = bccx.tcx.hir.body_owner_def_id(body.id());
     let infcx = bccx.tcx.borrowck_fake_infer_ctxt(body.id());
+    let param_env = bccx.tcx.param_env(def_id);
     let mut clcx = CheckLoanCtxt {
         bccx: bccx,
         dfcx_loans: dfcx_loans,
         move_data: move_data,
         all_loans: all_loans,
-        param_env: &infcx.parameter_environment
+        param_env,
     };
-    euv::ExprUseVisitor::new(&mut clcx, &bccx.region_maps, &infcx).consume_body(body);
+    euv::ExprUseVisitor::new(&mut clcx, &bccx.region_maps, &infcx, param_env).consume_body(body);
 }
 
 #[derive(PartialEq)]
@@ -232,7 +234,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
         })
     }
 
-    pub fn each_in_scope_loan<F>(&self, scope: region::CodeExtent<'tcx>, mut op: F) -> bool where
+    pub fn each_in_scope_loan<F>(&self, scope: region::CodeExtent, mut op: F) -> bool where
         F: FnMut(&Loan<'tcx>) -> bool,
     {
         //! Like `each_issued_loan()`, but only considers loans that are
@@ -248,7 +250,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
     }
 
     fn each_in_scope_loan_affecting_path<F>(&self,
-                                            scope: region::CodeExtent<'tcx>,
+                                            scope: region::CodeExtent,
                                             loan_path: &LoanPath<'tcx>,
                                             mut op: F)
                                             -> bool where
@@ -469,13 +471,13 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                                   nl, new_loan_msg);
                     err.span_label(
                             old_loan.span,
-                            &format!("first mutable borrow occurs here{}", old_loan_msg));
+                            format!("first mutable borrow occurs here{}", old_loan_msg));
                     err.span_label(
                             new_loan.span,
-                            &format!("second mutable borrow occurs here{}", new_loan_msg));
+                            format!("second mutable borrow occurs here{}", new_loan_msg));
                     err.span_label(
                             previous_end_span,
-                            &format!("first borrow ends here"));
+                            "first borrow ends here");
                     err
                 }
 
@@ -486,13 +488,13 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                      nl);
                     err.span_label(
                             old_loan.span,
-                            &format!("first closure is constructed here"));
+                            "first closure is constructed here");
                     err.span_label(
                             new_loan.span,
-                            &format!("second closure is constructed here"));
+                            "second closure is constructed here");
                     err.span_label(
                             previous_end_span,
-                            &format!("borrow from first closure ends here"));
+                            "borrow from first closure ends here");
                     err
                 }
 
@@ -503,13 +505,13 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                                    nl, ol_pronoun, old_loan_msg);
                     err.span_label(
                             new_loan.span,
-                            &format!("closure construction occurs here{}", new_loan_msg));
+                            format!("closure construction occurs here{}", new_loan_msg));
                     err.span_label(
                             old_loan.span,
-                            &format!("borrow occurs here{}", old_loan_msg));
+                            format!("borrow occurs here{}", old_loan_msg));
                     err.span_label(
                             previous_end_span,
-                            &format!("borrow ends here"));
+                            "borrow ends here");
                     err
                 }
 
@@ -520,13 +522,13 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                                    nl, new_loan_msg, new_loan.kind.to_user_str());
                     err.span_label(
                             new_loan.span,
-                            &format!("borrow occurs here{}", new_loan_msg));
+                            format!("borrow occurs here{}", new_loan_msg));
                     err.span_label(
                             old_loan.span,
-                            &format!("closure construction occurs here{}", old_loan_msg));
+                            format!("closure construction occurs here{}", old_loan_msg));
                     err.span_label(
                             previous_end_span,
-                            &format!("borrow from closure ends here"));
+                            "borrow from closure ends here");
                     err
                 }
 
@@ -542,17 +544,17 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                                    old_loan_msg);
                     err.span_label(
                             new_loan.span,
-                            &format!("{} borrow occurs here{}",
+                            format!("{} borrow occurs here{}",
                                      new_loan.kind.to_user_str(),
                                      new_loan_msg));
                     err.span_label(
                             old_loan.span,
-                            &format!("{} borrow occurs here{}",
+                            format!("{} borrow occurs here{}",
                                      old_loan.kind.to_user_str(),
                                      old_loan_msg));
                     err.span_label(
                             previous_end_span,
-                            &format!("{} borrow ends here",
+                            format!("{} borrow ends here",
                                      old_loan.kind.to_user_str()));
                     err
                 }
@@ -562,7 +564,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                 euv::ClosureCapture(span) => {
                     err.span_label(
                         span,
-                        &format!("borrow occurs due to use of `{}` in closure", nl));
+                        format!("borrow occurs due to use of `{}` in closure", nl));
                 }
                 _ => { }
             }
@@ -571,7 +573,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                 euv::ClosureCapture(span) => {
                     err.span_label(
                         span,
-                        &format!("previous borrow occurs due to use of `{}` in closure",
+                        format!("previous borrow occurs due to use of `{}` in closure",
                                  ol));
                 }
                 _ => { }
@@ -633,11 +635,11 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                  "cannot use `{}` because it was mutably borrowed",
                                  &self.bccx.loan_path_to_string(copy_path))
                     .span_label(loan_span,
-                               &format!("borrow of `{}` occurs here",
+                               format!("borrow of `{}` occurs here",
                                        &self.bccx.loan_path_to_string(&loan_path))
                                )
                     .span_label(span,
-                               &format!("use of borrowed `{}`",
+                               format!("use of borrowed `{}`",
                                         &self.bccx.loan_path_to_string(&loan_path)))
                     .emit();
             }
@@ -662,12 +664,12 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                          &self.bccx.loan_path_to_string(move_path));
                         err.span_label(
                             loan_span,
-                            &format!("borrow of `{}` occurs here",
+                            format!("borrow of `{}` occurs here",
                                     &self.bccx.loan_path_to_string(&loan_path))
                             );
                         err.span_label(
                             span,
-                            &format!("move into closure occurs here")
+                            "move into closure occurs here"
                             );
                         err
                     }
@@ -679,12 +681,12 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                                          &self.bccx.loan_path_to_string(move_path));
                         err.span_label(
                             loan_span,
-                            &format!("borrow of `{}` occurs here",
+                            format!("borrow of `{}` occurs here",
                                     &self.bccx.loan_path_to_string(&loan_path))
                             );
                         err.span_label(
                             span,
-                            &format!("move out of `{}` occurs here",
+                            format!("move out of `{}` occurs here",
                                 &self.bccx.loan_path_to_string(move_path))
                             );
                         err
@@ -708,7 +710,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
         let mut ret = UseOk;
 
         self.each_in_scope_loan_affecting_path(
-            self.tcx().node_extent(expr_id), use_path, |loan| {
+            region::CodeExtent::Misc(expr_id), use_path, |loan| {
             if !compatible_borrow_kinds(loan.kind, borrow_kind) {
                 ret = UseWhileBorrowed(loan.loan_path.clone(), loan.span);
                 false
@@ -805,7 +807,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                 self.check_if_assigned_path_is_moved(id, span,
                                                      use_kind, lp_base);
             }
-            LpExtend(ref lp_base, _, LpInterior(_, InteriorElement(..))) |
+            LpExtend(ref lp_base, _, LpInterior(_, InteriorElement)) |
             LpExtend(ref lp_base, _, LpDeref(_)) => {
                 // assigning to `P[i]` requires `P` is initialized
                 // assigning to `(*P)` requires `P` is initialized
@@ -822,7 +824,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
 
         // Check that we don't invalidate any outstanding loans
         if let Some(loan_path) = opt_loan_path(&assignee_cmt) {
-            let scope = self.tcx().node_extent(assignment_id);
+            let scope = region::CodeExtent::Misc(assignment_id);
             self.each_in_scope_loan_affecting_path(scope, &loan_path, |loan| {
                 self.report_illegal_mutation(assignment_span, &loan_path, loan);
                 false
@@ -857,10 +859,10 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                          "cannot assign to `{}` because it is borrowed",
                          self.bccx.loan_path_to_string(loan_path))
             .span_label(loan.span,
-                       &format!("borrow of `{}` occurs here",
+                       format!("borrow of `{}` occurs here",
                                self.bccx.loan_path_to_string(loan_path)))
             .span_label(span,
-                       &format!("assignment to borrowed `{}` occurs here",
+                       format!("assignment to borrowed `{}` occurs here",
                                self.bccx.loan_path_to_string(loan_path)))
             .emit();
     }

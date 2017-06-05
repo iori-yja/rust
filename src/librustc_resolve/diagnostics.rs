@@ -838,6 +838,32 @@ trait Foo {
 
 fn foo<T>(x: T) {} // ok!
 ```
+
+Another case that causes this error is when a type is imported into a parent
+module. To fix this, you can follow the suggestion and use File directly or
+`use super::File;` which will import the types from the parent namespace. An
+example that causes this error is below:
+
+```compile_fail,E0412
+use std::fs::File;
+
+mod foo {
+    fn some_function(f: File) {}
+}
+```
+
+```
+use std::fs::File;
+
+mod foo {
+    // either
+    use super::File;
+    // or
+    // use std::fs::File;
+    fn foo(f: File) {}
+}
+# fn main() {} // don't insert it for us; that'll break imports
+```
 "##,
 
 E0415: r##"
@@ -1222,27 +1248,26 @@ fn foo() {
 "##,
 
 E0435: r##"
-A non-constant value was used to initialise a constant.
+A non-constant value was used in a constant expression.
 
 Erroneous code example:
 
 ```compile_fail,E0435
-let foo = 42u32;
-const FOO : u32 = foo; // error: attempt to use a non-constant value in a
-                       //        constant
+let foo = 42;
+let a: [u8; foo]; // error: attempt to use a non-constant value in a constant
 ```
 
 To fix this error, please replace the value with a constant. Example:
 
 ```
-const FOO : u32 = 42u32; // ok!
+let a: [u8; 42]; // ok!
 ```
 
 Or:
 
 ```
-const OTHER_FOO : u32 = 42u32;
-const FOO : u32 = OTHER_FOO; // ok!
+const FOO: usize = 42;
+let a: [u8; FOO]; // ok!
 ```
 "##,
 
@@ -1560,7 +1585,7 @@ register_diagnostics! {
 //  E0157, unused error code
 //  E0257,
 //  E0258,
-    E0402, // cannot use an outer type parameter in this context
+//  E0402, // cannot use an outer type parameter in this context
 //  E0406, merged into 420
 //  E0410, merged into 408
 //  E0413, merged into 530

@@ -27,8 +27,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                              -> BlockAnd<Operand<'tcx>>
         where M: Mirror<'tcx, Output = Expr<'tcx>>
     {
-        let topmost_scope = self.topmost_scope(); // FIXME(#6393)
-        self.as_operand(block, Some(topmost_scope), expr)
+        let local_scope = self.local_scope();
+        self.as_operand(block, local_scope, expr)
     }
 
     /// Compile `expr` into a value that can be used as an operand.
@@ -39,7 +39,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// The operand is known to be live until the end of `scope`.
     pub fn as_operand<M>(&mut self,
                          block: BasicBlock,
-                         scope: Option<CodeExtent<'tcx>>,
+                         scope: Option<CodeExtent>,
                          expr: M) -> BlockAnd<Operand<'tcx>>
         where M: Mirror<'tcx, Output = Expr<'tcx>>
     {
@@ -49,7 +49,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
     fn expr_as_operand(&mut self,
                        mut block: BasicBlock,
-                       scope: Option<CodeExtent<'tcx>>,
+                       scope: Option<CodeExtent>,
                        expr: Expr<'tcx>)
                        -> BlockAnd<Operand<'tcx>> {
         debug!("expr_as_operand(block={:?}, expr={:?})", block, expr);
@@ -66,7 +66,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         match category {
             Category::Constant => {
                 let constant = this.as_constant(expr);
-                block.and(Operand::Constant(constant))
+                block.and(Operand::Constant(box constant))
             }
             Category::Lvalue |
             Category::Rvalue(..) => {

@@ -10,6 +10,7 @@
 
 use rustc_data_structures::graph;
 use cfg::*;
+use middle::region::CodeExtent;
 use ty::{self, TyCtxt};
 use syntax::ast;
 use syntax::ptr::P;
@@ -354,11 +355,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) if self.tables.is_method_call(expr.id) => {
+            hir::ExprBinary(_, ref l, ref r) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &l, Some(&**r).into_iter())
             }
 
-            hir::ExprUnary(_, ref e) if self.tables.is_method_call(expr.id) => {
+            hir::ExprUnary(_, ref e) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &e, None::<hir::Expr>.iter())
             }
 
@@ -411,16 +412,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             pred: CFGIndex,
             func_or_rcvr: &hir::Expr,
             args: I) -> CFGIndex {
-        let method_call = ty::MethodCall::expr(call_expr.id);
-        let fn_ty = match self.tables.method_map.get(&method_call) {
-            Some(method) => method.ty,
-            None => self.tables.expr_ty_adjusted(func_or_rcvr),
-        };
-
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
         let ret = self.straightline(call_expr, func_or_rcvr_exit, args);
         // FIXME(canndrew): This is_never should probably be an is_uninhabited.
-        if fn_ty.fn_ret().0.is_never() {
+        if self.tables.expr_ty(call_expr).is_never() {
             self.add_unreachable_node()
         } else {
             ret
@@ -586,8 +581,8 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                         scope_id: ast::NodeId,
                         to_index: CFGIndex) {
         let mut data = CFGEdgeData { exiting_scopes: vec![] };
-        let mut scope = self.tcx.node_extent(from_expr.id);
-        let target_scope = self.tcx.node_extent(scope_id);
+        let mut scope = CodeExtent::Misc(from_expr.id);
+        let target_scope = CodeExtent::Misc(scope_id);
         let region_maps = self.tcx.region_maps(self.owner_def_id);
         while scope != target_scope {
             data.exiting_scopes.push(scope.node_id());

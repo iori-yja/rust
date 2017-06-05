@@ -78,7 +78,7 @@ impl<'a, 'tcx> Qualif {
     /// Remove flags which are impossible for the given type.
     fn restrict(&mut self, ty: Ty<'tcx>,
                 tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                param_env: &ty::ParameterEnvironment<'tcx>) {
+                param_env: ty::ParamEnv<'tcx>) {
         if ty.is_freeze(tcx, param_env, DUMMY_SP) {
             *self = *self - Qualif::MUTABLE_INTERIOR;
         }
@@ -128,7 +128,7 @@ struct Qualifier<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     mir: &'a Mir<'tcx>,
     rpo: ReversePostorder<'a, 'tcx>,
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    param_env: ty::ParameterEnvironment<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
     temp_qualif: IndexVec<Local, Option<Qualif>>,
     return_qualif: Option<Qualif>,
     qualif: Qualif,
@@ -139,7 +139,7 @@ struct Qualifier<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
 
 impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
     fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-           param_env: ty::ParameterEnvironment<'tcx>,
+           param_env: ty::ParamEnv<'tcx>,
            def_id: DefId,
            mir: &'a Mir<'tcx>,
            mode: Mode)
@@ -193,7 +193,7 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
     /// Add the given type's qualification to self.qualif.
     fn add_type(&mut self, ty: Ty<'tcx>) {
         self.add(Qualif::MUTABLE_INTERIOR | Qualif::NEEDS_DROP);
-        self.qualif.restrict(ty, self.tcx, &self.param_env);
+        self.qualif.restrict(ty, self.tcx, self.param_env);
     }
 
     /// Within the provided closure, self.qualif will start
@@ -242,9 +242,9 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
                    to the crate attributes to enable");
         } else {
             self.find_drop_implementation_method_span()
-                .map(|span| err.span_label(span, &format!("destructor defined here")));
+                .map(|span| err.span_label(span, "destructor defined here"));
 
-            err.span_label(self.span, &format!("constants cannot have destructors"));
+            err.span_label(self.span, "constants cannot have destructors");
         }
 
         err.emit();
@@ -291,8 +291,8 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
                 "cannot refer to statics by value, use a constant instead"
             };
             struct_span_err!(self.tcx.sess, self.span, E0394, "{}", msg)
-                .span_label(self.span, &format!("referring to another static by value"))
-                .note(&format!("use the address-of operator or a constant instead"))
+                .span_label(self.span, "referring to another static by value")
+                .note("use the address-of operator or a constant instead")
                 .emit();
 
             // Replace STATIC with NOT_CONST to avoid further errors.
@@ -361,7 +361,7 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
 
     /// Qualify a whole const, static initializer or const fn.
     fn qualify_const(&mut self) -> Qualif {
-        debug!("qualifying {} {}", self.mode, self.tcx.item_path_str(self.def_id));
+        debug!("qualifying {} {:?}", self.mode, self.def_id);
 
         let mir = self.mir;
 
@@ -529,7 +529,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                                         "raw pointers cannot be dereferenced in {}s",
                                         this.mode)
                                     .span_label(this.span,
-                                        &format!("dereference of raw pointer in constant"))
+                                        "dereference of raw pointer in constant")
                                     .emit();
                                 }
                             }
@@ -544,7 +544,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                                            static, use a constant instead");
                             }
                             let ty = lvalue.ty(this.mir, this.tcx).to_ty(this.tcx);
-                            this.qualif.restrict(ty, this.tcx, &this.param_env);
+                            this.qualif.restrict(ty, this.tcx, this.param_env);
                         }
 
                         ProjectionElem::ConstantIndex {..} |
@@ -595,7 +595,9 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
         match *rvalue {
             Rvalue::Use(_) |
             Rvalue::Repeat(..) |
-            Rvalue::UnaryOp(..) |
+            Rvalue::UnaryOp(UnOp::Neg, _) |
+            Rvalue::UnaryOp(UnOp::Not, _) |
+            Rvalue::NullaryOp(NullOp::SizeOf, _) |
             Rvalue::CheckedBinaryOp(..) |
             Rvalue::Cast(CastKind::ReifyFnPointer, ..) |
             Rvalue::Cast(CastKind::UnsafeFnPointer, ..) |
@@ -645,7 +647,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                             struct_span_err!(self.tcx.sess,  self.span, E0017,
                                              "references in {}s may only refer \
                                               to immutable values", self.mode)
-                                .span_label(self.span, &format!("{}s require immutable values",
+                                .span_label(self.span, format!("{}s require immutable values",
                                                                 self.mode))
                                 .emit();
                         }
@@ -703,7 +705,8 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                 if let ty::TyRawPtr(_) = lhs.ty(self.mir, self.tcx).sty {
                     assert!(op == BinOp::Eq || op == BinOp::Ne ||
                             op == BinOp::Le || op == BinOp::Lt ||
-                            op == BinOp::Ge || op == BinOp::Gt);
+                            op == BinOp::Ge || op == BinOp::Gt ||
+                            op == BinOp::Offset);
 
                     self.add(Qualif::NOT_CONST);
                     if self.mode != Mode::Fn {
@@ -713,24 +716,24 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                             self.mode)
                         .span_label(
                             self.span,
-                            &format!("comparing raw pointers in static"))
+                            "comparing raw pointers in static")
                         .emit();
                     }
                 }
             }
 
-            Rvalue::Box(_) => {
+            Rvalue::NullaryOp(NullOp::Box, _) => {
                 self.add(Qualif::NOT_CONST);
                 if self.mode != Mode::Fn {
                     struct_span_err!(self.tcx.sess, self.span, E0010,
                                      "allocations are not allowed in {}s", self.mode)
-                        .span_label(self.span, &format!("allocation not allowed in {}s", self.mode))
+                        .span_label(self.span, format!("allocation not allowed in {}s", self.mode))
                         .emit();
                 }
             }
 
             Rvalue::Aggregate(ref kind, _) => {
-                if let AggregateKind::Adt(def, ..) = *kind {
+                if let AggregateKind::Adt(def, ..) = **kind {
                     if def.has_dtor(self.tcx) {
                         self.add(Qualif::NEEDS_DROP);
                         self.deny_drop();
@@ -937,8 +940,7 @@ fn mir_const_qualif<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         return Qualif::NOT_CONST.bits();
     }
 
-    let node_id = tcx.hir.as_local_node_id(def_id).unwrap();
-    let param_env = ty::ParameterEnvironment::for_item(tcx, node_id);
+    let param_env = tcx.param_env(def_id);
 
     let mut qualifier = Qualifier::new(tcx, param_env, def_id, mir, Mode::Const);
     qualifier.qualify_const().bits()
@@ -966,7 +968,7 @@ impl MirPass for QualifyAndPromoteConstants {
             MirSource::Const(_) |
             MirSource::Promoted(..) => return
         };
-        let param_env = ty::ParameterEnvironment::for_item(tcx, id);
+        let param_env = tcx.param_env(def_id);
 
         if mode == Mode::Fn || mode == Mode::ConstFn {
             // This is ugly because Qualifier holds onto mir,
@@ -996,10 +998,13 @@ impl MirPass for QualifyAndPromoteConstants {
         // Statics must be Sync.
         if mode == Mode::Static {
             let ty = mir.return_ty;
-            tcx.infer_ctxt((), Reveal::UserFacing).enter(|infcx| {
+            tcx.infer_ctxt(()).enter(|infcx| {
+                let param_env = ty::ParamEnv::empty(Reveal::UserFacing);
                 let cause = traits::ObligationCause::new(mir.span, id, traits::SharedStatic);
                 let mut fulfillment_cx = traits::FulfillmentContext::new();
-                fulfillment_cx.register_bound(&infcx, ty,
+                fulfillment_cx.register_bound(&infcx,
+                                              param_env,
+                                              ty,
                                               tcx.require_lang_item(lang_items::SyncTraitLangItem),
                                               cause);
                 if let Err(err) = fulfillment_cx.select_all_or_error(&infcx) {

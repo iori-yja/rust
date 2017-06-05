@@ -57,7 +57,10 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         let trait_ref = ty::TraitRef::new(fn_once, fn_once_substs);
                         let poly_trait_ref = trait_ref.to_poly_trait_ref();
                         let obligation =
-                            Obligation::misc(span, self.body_id, poly_trait_ref.to_predicate());
+                            Obligation::misc(span,
+                                             self.body_id,
+                                             self.param_env,
+                                             poly_trait_ref.to_predicate());
                         SelectionContext::new(self).evaluate_obligation(&obligation)
                     })
                 })
@@ -165,18 +168,21 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                                .. }) => {
                 let tcx = self.tcx;
 
-                let mut err = self.type_error_struct(span,
-                                                     |actual| {
-                    format!("no {} named `{}` found for type `{}` in the current scope",
-                            if mode == Mode::MethodCall {
-                                "method"
-                            } else {
-                                "associated item"
-                            },
-                            item_name,
-                            actual)
-                },
-                                                     rcvr_ty);
+                let actual = self.resolve_type_vars_if_possible(&rcvr_ty);
+                let mut err = if !actual.references_error() {
+                    struct_span_err!(tcx.sess, span, E0599,
+                                     "no {} named `{}` found for type `{}` in the \
+                                      current scope",
+                                     if mode == Mode::MethodCall {
+                                         "method"
+                                     } else {
+                                         "associated item"
+                                     },
+                                     item_name,
+                                     self.ty_to_string(actual))
+                } else {
+                    self.tcx.sess.diagnostic().struct_dummy()
+                };
 
                 // If the method name is the name of a field with a function or closure type,
                 // give a helping note that it has to be called as (x.f)(...).
@@ -195,8 +201,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                     };
 
                                     let field_ty = field.ty(tcx, substs);
-
-                                    if tcx.vis_is_accessible_from(field.vis, self.body_id) {
+                                    let scope = self.tcx.hir.get_module_parent(self.body_id);
+                                    if field.vis.is_accessible_from(scope, self.tcx) {
                                         if self.is_fn_ty(&field_ty, span) {
                                             err.help(&format!("use `({0}.{1})(...)` if you \
                                                                meant to call the function \
@@ -209,9 +215,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                                               expr_string,
                                                               item_name));
                                         }
-                                        err.span_label(span, &"field, not a method");
+                                        err.span_label(span, "field, not a method");
                                     } else {
-                                        err.span_label(span, &"private field, not a method");
+                                        err.span_label(span, "private field, not a method");
                                     }
                                     break;
                                 }
@@ -251,9 +257,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     let bound_list = unsatisfied_predicates.iter()
                         .map(|p| format!("`{} : {}`", p.self_ty(), p))
                         .collect::<Vec<_>>()
-                        .join(", ");
+                        .join("\n");
                     err.note(&format!("the method `{}` exists but the following trait bounds \
-                                       were not satisfied: {}",
+                                       were not satisfied:\n{}",
                                       item_name,
                                       bound_list));
                 }
@@ -272,7 +278,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                                span,
                                                E0034,
                                                "multiple applicable items in scope");
-                err.span_label(span, &format!("multiple `{}` found", item_name));
+                err.span_label(span, format!("multiple `{}` found", item_name));
 
                 report_candidates(&mut err, sources);
                 err.emit();

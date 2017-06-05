@@ -19,6 +19,7 @@ use rustc::ty::{self, TyCtxt, GlobalArenas};
 use rustc::hir::map as hir_map;
 use rustc::lint;
 use rustc::util::nodemap::FxHashMap;
+use rustc_trans;
 use rustc_trans::back::link;
 use rustc_resolve as resolve;
 use rustc_metadata::cstore::CStore;
@@ -104,7 +105,8 @@ pub fn run_core(search_paths: SearchPaths,
                 externs: config::Externs,
                 input: Input,
                 triple: Option<String>,
-                maybe_sysroot: Option<PathBuf>) -> (clean::Crate, RenderInfo)
+                maybe_sysroot: Option<PathBuf>,
+                allow_warnings: bool) -> (clean::Crate, RenderInfo)
 {
     // Parse, resolve, and typecheck the given crate.
 
@@ -119,7 +121,7 @@ pub fn run_core(search_paths: SearchPaths,
         maybe_sysroot: maybe_sysroot,
         search_paths: search_paths,
         crate_types: vec![config::CrateTypeRlib],
-        lint_opts: vec![(warning_lint, lint::Allow)],
+        lint_opts: if !allow_warnings { vec![(warning_lint, lint::Allow)] } else { vec![] },
         lint_cap: Some(lint::Allow),
         externs: externs,
         target_triple: triple.unwrap_or(config::host_triple().to_string()),
@@ -137,10 +139,11 @@ pub fn run_core(search_paths: SearchPaths,
 
     let dep_graph = DepGraph::new(false);
     let _ignore = dep_graph.in_ignore();
-    let cstore = Rc::new(CStore::new(&dep_graph));
+    let cstore = Rc::new(CStore::new(&dep_graph, box rustc_trans::LlvmMetadataLoader));
     let mut sess = session::build_session_(
         sessopts, &dep_graph, cpath, diagnostic_handler, codemap, cstore.clone()
     );
+    rustc_trans::init(&sess);
     rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
 
     let mut cfg = config::build_configuration(&sess, config::parse_cfgspecs(cfgs));

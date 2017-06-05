@@ -21,8 +21,8 @@ pub use syntax_pos::*;
 pub use syntax_pos::hygiene::{ExpnFormat, ExpnInfo, NameAndSpan};
 pub use self::ExpnFormat::*;
 
-use std::cell::RefCell;
-use std::path::{Path,PathBuf};
+use std::cell::{RefCell, Ref};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use std::env;
@@ -103,7 +103,7 @@ impl FileLoader for RealFileLoader {
 //
 
 pub struct CodeMap {
-    pub files: RefCell<Vec<Rc<FileMap>>>,
+    pub(super) files: RefCell<Vec<Rc<FileMap>>>,
     file_loader: Box<FileLoader>,
     // This is used to apply the file path remapping as specified via
     // -Zremap-path-prefix to all FileMaps allocated within this CodeMap.
@@ -142,6 +142,10 @@ impl CodeMap {
         Ok(self.new_filemap(path.to_str().unwrap().to_string(), src))
     }
 
+    pub fn files(&self) -> Ref<Vec<Rc<FileMap>>> {
+        self.files.borrow()
+    }
+
     fn next_start_pos(&self) -> usize {
         let files = self.files.borrow();
         match files.last() {
@@ -170,6 +174,7 @@ impl CodeMap {
         let filemap = Rc::new(FileMap {
             name: filename,
             name_was_remapped: was_remapped,
+            crate_of_origin: 0,
             src: Some(Rc::new(src)),
             start_pos: Pos::from_usize(start_pos),
             end_pos: Pos::from_usize(end_pos),
@@ -204,6 +209,7 @@ impl CodeMap {
     pub fn new_imported_filemap(&self,
                                 filename: FileName,
                                 name_was_remapped: bool,
+                                crate_of_origin: u32,
                                 source_len: usize,
                                 mut file_local_lines: Vec<BytePos>,
                                 mut file_local_multibyte_chars: Vec<MultiByteChar>)
@@ -225,6 +231,7 @@ impl CodeMap {
         let filemap = Rc::new(FileMap {
             name: filename,
             name_was_remapped: name_was_remapped,
+            crate_of_origin: crate_of_origin,
             src: None,
             start_pos: start_pos,
             end_pos: end_pos,
@@ -454,7 +461,7 @@ impl CodeMap {
         match self.span_to_snippet(sp) {
             Ok(snippet) => {
                 let snippet = snippet.split(c).nth(0).unwrap_or("").trim_right();
-                if snippet.len() > 0 && !snippet.contains('\n') {
+                if !snippet.is_empty() && !snippet.contains('\n') {
                     Span { hi: BytePos(sp.lo.0 + snippet.len() as u32), ..sp }
                 } else {
                     sp
@@ -536,7 +543,7 @@ impl CodeMap {
     }
 
     pub fn count_lines(&self) -> usize {
-        self.files.borrow().iter().fold(0, |a, f| a + f.count_lines())
+        self.files().iter().fold(0, |a, f| a + f.count_lines())
     }
 }
 

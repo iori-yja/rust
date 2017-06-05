@@ -216,9 +216,11 @@ pub fn parameterized(f: &mut fmt::Formatter,
 
     for projection in projections {
         start_or_continue(f, "<", ", ")?;
-        write!(f, "{}={}",
-               projection.projection_ty.item_name,
-               projection.ty)?;
+        ty::tls::with(|tcx|
+            write!(f, "{}={}",
+            projection.projection_ty.item_name(tcx),
+            projection.ty)
+        )?;
     }
 
     start_or_continue(f, "", ">")?;
@@ -361,12 +363,6 @@ impl<'tcx> fmt::Display for ty::TypeAndMut<'tcx> {
     }
 }
 
-impl<'tcx> fmt::Debug for ty::ItemSubsts<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ItemSubsts({:?})", self.substs)
-    }
-}
-
 impl<'tcx> fmt::Debug for ty::TraitRef<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // when printing out the debug representation, we don't need
@@ -458,7 +454,7 @@ impl fmt::Debug for ty::BoundRegion {
     }
 }
 
-impl<'tcx> fmt::Debug for ty::RegionKind<'tcx> {
+impl fmt::Debug for ty::RegionKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             ty::ReEarlyBound(ref data) => {
@@ -504,19 +500,7 @@ impl<'tcx> fmt::Debug for ty::ClosureUpvar<'tcx> {
     }
 }
 
-impl<'tcx> fmt::Debug for ty::ParameterEnvironment<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ParameterEnvironment(\
-            free_substs={:?}, \
-            implicit_region_bound={:?}, \
-            caller_bounds={:?})",
-            self.free_substs,
-            self.implicit_region_bound,
-            self.caller_bounds)
-    }
-}
-
-impl<'tcx> fmt::Display for ty::RegionKind<'tcx> {
+impl fmt::Display for ty::RegionKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if verbose() {
             return write!(f, "{:?}", *self);
@@ -544,7 +528,7 @@ impl<'tcx> fmt::Display for ty::RegionKind<'tcx> {
     }
 }
 
-impl<'tcx> fmt::Debug for ty::FreeRegion<'tcx> {
+impl fmt::Debug for ty::FreeRegion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ReFree({:?}, {:?})",
                self.scope, self.bound_region)
@@ -941,9 +925,10 @@ impl<'tcx> fmt::Display for ty::ProjectionPredicate<'tcx> {
 
 impl<'tcx> fmt::Display for ty::ProjectionTy<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let item_name = ty::tls::with(|tcx| self.item_name(tcx));
         write!(f, "{:?}::{}",
                self.trait_ref,
-               self.item_name)
+               item_name)
     }
 }
 

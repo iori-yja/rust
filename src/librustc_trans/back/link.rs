@@ -12,19 +12,17 @@ use super::archive::{ArchiveBuilder, ArchiveConfig};
 use super::linker::Linker;
 use super::rpath::RPathConfig;
 use super::rpath;
-use super::msvc;
-use session::config;
-use session::config::NoDebugInfo;
-use session::config::{OutputFilenames, Input, OutputType};
-use session::filesearch;
-use session::search_paths::PathKind;
-use session::Session;
-use middle::cstore::{self, LinkMeta, NativeLibrary, LibSource};
-use middle::cstore::{LinkagePreference, NativeLibraryKind};
-use middle::dependency_format::Linkage;
+use metadata::METADATA_FILENAME;
+use rustc::session::config::{self, NoDebugInfo, OutputFilenames, Input, OutputType};
+use rustc::session::filesearch;
+use rustc::session::search_paths::PathKind;
+use rustc::session::Session;
+use rustc::middle::cstore::{self, LinkMeta, NativeLibrary, LibSource, LinkagePreference,
+                            NativeLibraryKind};
+use rustc::middle::dependency_format::Linkage;
 use CrateTranslation;
-use util::common::time;
-use util::fs::fix_windows_verbatim_for_gcc;
+use rustc::util::common::time;
+use rustc::util::fs::fix_windows_verbatim_for_gcc;
 use rustc::dep_graph::DepNode;
 use rustc::hir::def_id::CrateNum;
 use rustc::hir::svh::Svh;
@@ -143,18 +141,39 @@ pub fn build_link_meta(incremental_hashes_map: &IncrementalHashesMap) -> LinkMet
     return r;
 }
 
-// The third parameter is for an extra path to add to PATH for MSVC
-// cross linkers for host toolchain DLL dependencies
-pub fn get_linker(sess: &Session) -> (String, Command, Option<PathBuf>) {
+// The third parameter is for an env vars, used to set up the path for MSVC
+// to find its DLLs
+pub fn get_linker(sess: &Session) -> (String, Command, Vec<(OsString, OsString)>) {
     if let Some(ref linker) = sess.opts.cg.linker {
-        (linker.clone(), Command::new(linker), None)
+        (linker.clone(), Command::new(linker), vec![])
     } else if sess.target.target.options.is_like_msvc {
-        let (cmd, host) = msvc::link_exe_cmd(sess);
-        ("link.exe".to_string(), cmd, host)
+        let (cmd, envs) = msvc_link_exe_cmd(sess);
+        ("link.exe".to_string(), cmd, envs)
     } else {
         (sess.target.target.options.linker.clone(),
-         Command::new(&sess.target.target.options.linker), None)
+         Command::new(&sess.target.target.options.linker), vec![])
     }
+}
+
+#[cfg(windows)]
+pub fn msvc_link_exe_cmd(sess: &Session) -> (Command, Vec<(OsString, OsString)>) {
+    use gcc::windows_registry;
+
+    let target = &sess.opts.target_triple;
+    let tool = windows_registry::find_tool(target, "link.exe");
+
+    if let Some(tool) = tool {
+        let envs = tool.env().to_vec();
+        (tool.to_command(), envs)
+    } else {
+        debug!("Failed to locate linker.");
+        (Command::new("link.exe"), vec![])
+    }
+}
+
+#[cfg(not(windows))]
+pub fn msvc_link_exe_cmd(_sess: &Session) -> (Command, Vec<(OsString, OsString)>) {
+    (Command::new("link.exe"), vec![])
 }
 
 pub fn get_ar_prog(sess: &Session) -> String {
@@ -521,7 +540,7 @@ fn link_rlib<'a>(sess: &'a Session,
             // contain the metadata in a separate file. We use a temp directory
             // here so concurrent builds in the same directory don't try to use
             // the same filename for metadata (stomping over one another)
-            let metadata = tmpdir.join(sess.cstore.metadata_filename());
+            let metadata = tmpdir.join(METADATA_FILENAME);
             emit_metadata(sess, trans, &metadata);
             ab.add_file(&metadata);
 
@@ -707,13 +726,18 @@ fn link_natively(sess: &Session,
     let flavor = sess.linker_flavor();
 
     // The invocations of cc share some flags across platforms
-    let (pname, mut cmd, extra) = get_linker(sess);
-    cmd.env("PATH", command_path(sess, extra));
+    let (pname, mut cmd, envs) = get_linker(sess);
+    // This will set PATH on MSVC
+    cmd.envs(envs);
 
     let root = sess.target_filesearch(PathKind::Native).get_lib_path();
     if let Some(args) = sess.target.target.options.pre_link_args.get(&flavor) {
         cmd.args(args);
     }
+    if let Some(ref args) = sess.opts.debugging_opts.pre_link_args {
+        cmd.args(args);
+    }
+    cmd.args(&sess.opts.debugging_opts.pre_link_arg);
 
     let pre_link_objects = if crate_type == config::CrateTypeExecutable {
         &sess.target.target.options.pre_link_objects_exe
@@ -1141,8 +1165,7 @@ fn add_upstream_rust_crates(cmd: &mut Linker,
         archive.update_symbols();
 
         for f in archive.src_files() {
-            if f.ends_with("bytecode.deflate") ||
-                f == sess.cstore.metadata_filename() {
+            if f.ends_with("bytecode.deflate") || f == METADATA_FILENAME {
                     archive.remove_file(&f);
                     continue
                 }
@@ -1217,8 +1240,7 @@ fn add_upstream_rust_crates(cmd: &mut Linker,
 
             let mut any_objects = false;
             for f in archive.src_files() {
-                if f.ends_with("bytecode.deflate") ||
-                   f == sess.cstore.metadata_filename() {
+                if f.ends_with("bytecode.deflate") || f == METADATA_FILENAME {
                     archive.remove_file(&f);
                     continue
                 }

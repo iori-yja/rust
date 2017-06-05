@@ -9,7 +9,6 @@
 // except according to those terms.
 
 #![crate_name = "rustc_privacy"]
-#![unstable(feature = "rustc_private", issue = "27812")]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -18,8 +17,10 @@
 #![deny(warnings)]
 
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
+
+#![cfg_attr(stage0, unstable(feature = "rustc_private", issue = "27812"))]
+#![cfg_attr(stage0, feature(rustc_private))]
+#![cfg_attr(stage0, feature(staged_api))]
 
 extern crate rustc;
 #[macro_use] extern crate syntax;
@@ -27,7 +28,7 @@ extern crate syntax_pos;
 
 use rustc::hir::{self, PatKind};
 use rustc::hir::def::Def;
-use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, CrateNum, DefId};
+use rustc::hir::def_id::{LOCAL_CRATE, CrateNum, DefId};
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::hir::itemlikevisit::DeepVisitor;
 use rustc::lint;
@@ -36,7 +37,8 @@ use rustc::ty::{self, TyCtxt, Ty, TypeFoldable};
 use rustc::ty::fold::TypeVisitor;
 use rustc::ty::maps::Providers;
 use rustc::util::nodemap::NodeSet;
-use syntax::ast;
+use syntax::ast::{self, CRATE_NODE_ID, Ident};
+use syntax::symbol::keywords;
 use syntax_pos::Span;
 
 use std::cmp;
@@ -343,7 +345,35 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
     }
 
     fn visit_macro_def(&mut self, md: &'tcx hir::MacroDef) {
-        self.update(md.id, Some(AccessLevel::Public));
+        if md.legacy {
+            self.update(md.id, Some(AccessLevel::Public));
+            return
+        }
+
+        let module_did = ty::DefIdTree::parent(self.tcx, self.tcx.hir.local_def_id(md.id)).unwrap();
+        let mut module_id = self.tcx.hir.as_local_node_id(module_did).unwrap();
+        let level = if md.vis == hir::Public { self.get(module_id) } else { None };
+        let level = self.update(md.id, level);
+        if level.is_none() {
+            return
+        }
+
+        loop {
+            let module = if module_id == ast::CRATE_NODE_ID {
+                &self.tcx.hir.krate().module
+            } else if let hir::ItemMod(ref module) = self.tcx.hir.expect_item(module_id).node {
+                module
+            } else {
+                unreachable!()
+            };
+            for id in &module.item_ids {
+                self.update(id.id, level);
+            }
+            if module_id == ast::CRATE_NODE_ID {
+                break
+            }
+            module_id = self.tcx.hir.get_parent_node(module_id);
+        }
     }
 
     fn visit_ty(&mut self, ty: &'tcx hir::Ty) {
@@ -424,16 +454,18 @@ impl<'b, 'a, 'tcx> TypeVisitor<'tcx> for ReachEverythingInTheInterfaceVisitor<'b
 struct NamePrivacyVisitor<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     tables: &'a ty::TypeckTables<'tcx>,
-    current_item: DefId,
+    current_item: ast::NodeId,
 }
 
 impl<'a, 'tcx> NamePrivacyVisitor<'a, 'tcx> {
     // Checks that a field is accessible.
     fn check_field(&mut self, span: Span, def: &'tcx ty::AdtDef, field: &'tcx ty::FieldDef) {
-        if !def.is_enum() && !field.vis.is_accessible_from(self.current_item, self.tcx) {
+        let ident = Ident { ctxt: span.ctxt.modern(), ..keywords::Invalid.ident() };
+        let def_id = self.tcx.adjust_ident(ident, def.did, self.current_item).1;
+        if !def.is_enum() && !field.vis.is_accessible_from(def_id, self.tcx) {
             struct_span_err!(self.tcx.sess, span, E0451, "field `{}` of {} `{}` is private",
                              field.name, def.variant_descr(), self.tcx.item_path_str(def.did))
-                .span_label(span, &format!("field `{}` is private", field.name))
+                .span_label(span, format!("field `{}` is private", field.name))
                 .emit();
         }
     }
@@ -454,7 +486,7 @@ impl<'a, 'tcx> Visitor<'tcx> for NamePrivacyVisitor<'a, 'tcx> {
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item) {
-        let orig_current_item = replace(&mut self.current_item, self.tcx.hir.local_def_id(item.id));
+        let orig_current_item = replace(&mut self.current_item, item.id);
         intravisit::walk_item(self, item);
         self.current_item = orig_current_item;
     }
@@ -926,7 +958,7 @@ impl<'a, 'tcx: 'a> TypeVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'
                     if self.has_pub_restricted || self.has_old_errors {
                         let mut err = struct_span_err!(self.tcx.sess, self.span, E0446,
                             "private type `{}` in public interface", ty);
-                        err.span_label(self.span, &format!("can't leak private type"));
+                        err.span_label(self.span, "can't leak private type");
                         err.emit();
                     } else {
                         self.tcx.sess.add_lint(lint::builtin::PRIVATE_IN_PUBLIC,
@@ -961,7 +993,7 @@ impl<'a, 'tcx: 'a> TypeVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'
                 if self.has_pub_restricted || self.has_old_errors {
                     struct_span_err!(self.tcx.sess, self.span, E0445,
                                      "private trait `{}` in public interface", trait_ref)
-                        .span_label(self.span, &format!(
+                        .span_label(self.span, format!(
                                     "private trait can't be public"))
                         .emit();
                 } else {
@@ -1181,7 +1213,7 @@ fn privacy_access_levels<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let mut visitor = NamePrivacyVisitor {
         tcx: tcx,
         tables: &ty::TypeckTables::empty(),
-        current_item: DefId::local(CRATE_DEF_INDEX),
+        current_item: CRATE_NODE_ID,
     };
     intravisit::walk_crate(&mut visitor, krate);
 

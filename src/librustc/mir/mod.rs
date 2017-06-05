@@ -799,7 +799,7 @@ pub enum StatementKind<'tcx> {
     StorageDead(Lvalue<'tcx>),
 
     InlineAsm {
-        asm: InlineAsm,
+        asm: Box<InlineAsm>,
         outputs: Vec<Lvalue<'tcx>>,
         inputs: Vec<Operand<'tcx>>
     },
@@ -995,7 +995,7 @@ pub struct VisibilityScopeData {
 #[derive(Clone, PartialEq, RustcEncodable, RustcDecodable)]
 pub enum Operand<'tcx> {
     Consume(Lvalue<'tcx>),
-    Constant(Constant<'tcx>),
+    Constant(Box<Constant<'tcx>>),
 }
 
 impl<'tcx> Debug for Operand<'tcx> {
@@ -1015,7 +1015,7 @@ impl<'tcx> Operand<'tcx> {
         substs: &'tcx Substs<'tcx>,
         span: Span,
     ) -> Self {
-        Operand::Constant(Constant {
+        Operand::Constant(box Constant {
             span: span,
             ty: tcx.type_of(def_id).subst(tcx, substs),
             literal: Literal::Value { value: ConstVal::Function(def_id, substs) },
@@ -1046,6 +1046,7 @@ pub enum Rvalue<'tcx> {
     BinaryOp(BinOp, Operand<'tcx>, Operand<'tcx>),
     CheckedBinaryOp(BinOp, Operand<'tcx>, Operand<'tcx>),
 
+    NullaryOp(NullOp, Ty<'tcx>),
     UnaryOp(UnOp, Operand<'tcx>),
 
     /// Read the discriminant of an ADT.
@@ -1054,15 +1055,12 @@ pub enum Rvalue<'tcx> {
     /// be defined to return, say, a 0) if ADT is not an enum.
     Discriminant(Lvalue<'tcx>),
 
-    /// Creates an *uninitialized* Box
-    Box(Ty<'tcx>),
-
     /// Create an aggregate value, like a tuple or struct.  This is
     /// only needed because we want to distinguish `dest = Foo { x:
     /// ..., y: ... }` from `dest.x = ...; dest.y = ...;` in the case
     /// that `Foo` has a destructor. These rvalues can be optimized
     /// away after type-checking and before lowering.
-    Aggregate(AggregateKind<'tcx>, Vec<Operand<'tcx>>),
+    Aggregate(Box<AggregateKind<'tcx>>, Vec<Operand<'tcx>>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, RustcEncodable, RustcDecodable)]
@@ -1132,6 +1130,8 @@ pub enum BinOp {
     Ge,
     /// The `>` operator (greater than)
     Gt,
+    /// The `ptr.offset` operator
+    Offset,
 }
 
 impl BinOp {
@@ -1142,6 +1142,14 @@ impl BinOp {
             _ => false
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, RustcEncodable, RustcDecodable)]
+pub enum NullOp {
+    /// Return the size of a value of that type
+    SizeOf,
+    /// Create a new uninitialized box for a value of that type
+    Box,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, RustcEncodable, RustcDecodable)]
@@ -1167,7 +1175,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             }
             UnaryOp(ref op, ref a) => write!(fmt, "{:?}({:?})", op, a),
             Discriminant(ref lval) => write!(fmt, "discriminant({:?})", lval),
-            Box(ref t) => write!(fmt, "Box({:?})", t),
+            NullaryOp(ref op, ref t) => write!(fmt, "{:?}({:?})", op, t),
             Ref(_, borrow_kind, ref lv) => {
                 let kind_str = match borrow_kind {
                     BorrowKind::Shared => "",
@@ -1185,7 +1193,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     tuple_fmt.finish()
                 }
 
-                match *kind {
+                match **kind {
                     AggregateKind::Array(_) => write!(fmt, "{:?}", lvs),
 
                     AggregateKind::Tuple => {
@@ -1601,9 +1609,9 @@ impl<'tcx> TypeFoldable<'tcx> for Rvalue<'tcx> {
                 CheckedBinaryOp(op, rhs.fold_with(folder), lhs.fold_with(folder)),
             UnaryOp(op, ref val) => UnaryOp(op, val.fold_with(folder)),
             Discriminant(ref lval) => Discriminant(lval.fold_with(folder)),
-            Box(ty) => Box(ty.fold_with(folder)),
+            NullaryOp(op, ty) => NullaryOp(op, ty.fold_with(folder)),
             Aggregate(ref kind, ref fields) => {
-                let kind = match *kind {
+                let kind = box match **kind {
                     AggregateKind::Array(ty) => AggregateKind::Array(ty.fold_with(folder)),
                     AggregateKind::Tuple => AggregateKind::Tuple,
                     AggregateKind::Adt(def, v, substs, n) =>
@@ -1629,9 +1637,9 @@ impl<'tcx> TypeFoldable<'tcx> for Rvalue<'tcx> {
                 rhs.visit_with(visitor) || lhs.visit_with(visitor),
             UnaryOp(_, ref val) => val.visit_with(visitor),
             Discriminant(ref lval) => lval.visit_with(visitor),
-            Box(ty) => ty.visit_with(visitor),
+            NullaryOp(_, ty) => ty.visit_with(visitor),
             Aggregate(ref kind, ref fields) => {
-                (match *kind {
+                (match **kind {
                     AggregateKind::Array(ty) => ty.visit_with(visitor),
                     AggregateKind::Tuple => false,
                     AggregateKind::Adt(_, _, substs, _) => substs.visit_with(visitor),

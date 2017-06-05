@@ -64,11 +64,10 @@ use rustc::ty::{ToPredicate, ReprOptions};
 use rustc::ty::{self, AdtKind, ToPolyTraitRef, Ty, TyCtxt};
 use rustc::ty::maps::Providers;
 use rustc::ty::util::IntTypeExt;
-use util::nodemap::{NodeMap, FxHashMap};
+use util::nodemap::FxHashMap;
 
 use rustc_const_math::ConstInt;
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use syntax::{abi, ast};
@@ -101,6 +100,7 @@ pub fn provide(providers: &mut Providers) {
         impl_trait_ref,
         impl_polarity,
         is_foreign_item,
+        is_default_impl,
         ..*providers
     };
 }
@@ -116,7 +116,7 @@ pub fn provide(providers: &mut Providers) {
 /// `ItemCtxt` is parameterized by a `DefId` that it uses to satisfy
 /// `get_type_parameter_bounds` requests, drawing the information from
 /// the AST (`hir::Generics`), recursively.
-struct ItemCtxt<'a,'tcx:'a> {
+pub struct ItemCtxt<'a,'tcx:'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     item_def_id: DefId,
 }
@@ -180,7 +180,7 @@ impl<'a, 'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'a, 'tcx> {
 // Utility types and common code for the above passes.
 
 impl<'a, 'tcx> ItemCtxt<'a, 'tcx> {
-    fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>, item_def_id: DefId)
+    pub fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>, item_def_id: DefId)
            -> ItemCtxt<'a,'tcx> {
         ItemCtxt {
             tcx: tcx,
@@ -190,7 +190,7 @@ impl<'a, 'tcx> ItemCtxt<'a, 'tcx> {
 }
 
 impl<'a,'tcx> ItemCtxt<'a,'tcx> {
-    fn to_ty(&self, ast_ty: &hir::Ty) -> Ty<'tcx> {
+    pub fn to_ty(&self, ast_ty: &hir::Ty) -> Ty<'tcx> {
         AstConv::ast_ty_to_ty(self, ast_ty)
     }
 }
@@ -198,20 +198,12 @@ impl<'a,'tcx> ItemCtxt<'a,'tcx> {
 impl<'a, 'tcx> AstConv<'tcx, 'tcx> for ItemCtxt<'a, 'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'b, 'tcx, 'tcx> { self.tcx }
 
-    fn ast_ty_to_ty_cache(&self) -> &RefCell<NodeMap<Ty<'tcx>>> {
-        &self.tcx.ast_ty_to_ty_cache
-    }
-
     fn get_type_parameter_bounds(&self,
                                  span: Span,
                                  def_id: DefId)
                                  -> ty::GenericPredicates<'tcx>
     {
         self.tcx.at(span).type_param_predicates((self.item_def_id, def_id))
-    }
-
-    fn get_free_substs(&self) -> Option<&Substs<'tcx>> {
-        None
     }
 
     fn re_infer(&self, _span: Span, _def: Option<&ty::RegionParameterDef>)
@@ -225,7 +217,7 @@ impl<'a, 'tcx> AstConv<'tcx, 'tcx> for ItemCtxt<'a, 'tcx> {
             span,
             E0121,
             "the type placeholder `_` is not allowed within types on item signatures"
-        ).span_label(span, &format!("not allowed in type signatures"))
+        ).span_label(span, "not allowed in type signatures")
         .emit();
         self.tcx().types.err
     }
@@ -573,7 +565,7 @@ fn convert_enum_variant_types<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         } else {
             struct_span_err!(tcx.sess, variant.span, E0370,
                              "enum discriminant overflowed")
-                .span_label(variant.span, &format!("overflowed on value after {}",
+                .span_label(variant.span, format!("overflowed on value after {}",
                                                    prev_discr.unwrap()))
                 .note(&format!("explicitly set `{} = {}` if that is desired outcome",
                                variant.node.name, wrapped_discr))
@@ -609,8 +601,8 @@ fn convert_struct_variant<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             struct_span_err!(tcx.sess, f.span, E0124,
                              "field `{}` is already declared",
                              f.name)
-                .span_label(f.span, &"field already declared")
-                .span_label(prev_span, &format!("`{}` first declared here", f.name))
+                .span_label(f.span, "field already declared")
+                .span_label(prev_span, format!("`{}` first declared here", f.name))
                 .emit();
         } else {
             seen_fields.insert(f.name, f.span);
@@ -758,12 +750,12 @@ fn trait_def<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     }
 
     let def_path_hash = tcx.def_path_hash(def_id);
-    let def = ty::TraitDef::new(def_id, unsafety, paren_sugar, def_path_hash);
-
-    if tcx.hir.trait_is_auto(def_id) {
-        def.record_has_default_impl();
-    }
-
+    let has_default_impl = tcx.hir.trait_is_auto(def_id);
+    let def = ty::TraitDef::new(def_id,
+                                unsafety,
+                                paren_sugar,
+                                has_default_impl,
+                                def_path_hash);
     tcx.alloc_trait_def(def)
 }
 
@@ -1304,6 +1296,7 @@ fn predicates_of<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let mut index = parent_count + has_own_self as u32;
     for param in early_bound_lifetimes_from_generics(tcx, ast_generics) {
         let region = tcx.mk_region(ty::ReEarlyBound(ty::EarlyBoundRegion {
+            def_id: tcx.hir.local_def_id(param.lifetime.id),
             index: index,
             name: param.lifetime.name
         }));
@@ -1551,5 +1544,16 @@ fn is_foreign_item<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         Some(hir_map::NodeForeignItem(..)) => true,
         Some(_) => false,
         _ => bug!("is_foreign_item applied to non-local def-id {:?}", def_id)
+    }
+}
+
+fn is_default_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                             def_id: DefId)
+                             -> bool {
+    match tcx.hir.get_if_local(def_id) {
+        Some(hir_map::NodeItem(&hir::Item { node: hir::ItemDefaultImpl(..), .. }))
+             => true,
+        Some(_) => false,
+        _ => bug!("is_default_impl applied to non-local def-id {:?}", def_id)
     }
 }

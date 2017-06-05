@@ -15,7 +15,6 @@
 //! This API is completely unstable and subject to change.
 
 #![crate_name = "syntax_pos"]
-#![unstable(feature = "rustc_private", issue = "27812")]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -27,9 +26,11 @@
 #![feature(custom_attribute)]
 #![feature(optin_builtin_traits)]
 #![allow(unused_attributes)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
 #![feature(specialization)]
+
+#![cfg_attr(stage0, unstable(feature = "rustc_private", issue = "27812"))]
+#![cfg_attr(stage0, feature(rustc_private))]
+#![cfg_attr(stage0, feature(staged_api))]
 
 use std::cell::{Cell, RefCell};
 use std::ops::{Add, Sub};
@@ -377,6 +378,8 @@ pub struct FileMap {
     pub name: FileName,
     /// True if the `name` field above has been modified by -Zremap-path-prefix
     pub name_was_remapped: bool,
+    /// Indicates which crate this FileMap was imported from.
+    pub crate_of_origin: u32,
     /// The complete source code
     pub src: Option<Rc<String>>,
     /// The start position of this source in the CodeMap
@@ -491,6 +494,10 @@ impl Decodable for FileMap {
             Ok(FileMap {
                 name: name,
                 name_was_remapped: name_was_remapped,
+                // `crate_of_origin` has to be set by the importer.
+                // This value matches up with rustc::hir::def_id::INVALID_CRATE.
+                // That constant is not available here unfortunately :(
+                crate_of_origin: ::std::u32::MAX - 1,
                 start_pos: start_pos,
                 end_pos: end_pos,
                 src: None,

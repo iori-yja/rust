@@ -204,7 +204,7 @@ use rustc::mir::visit::Visitor as MirVisitor;
 use context::SharedCrateContext;
 use common::{def_ty, instance_ty};
 use monomorphize::{self, Instance};
-use util::nodemap::{FxHashSet, FxHashMap, DefIdMap};
+use rustc::util::nodemap::{FxHashSet, FxHashMap, DefIdMap};
 
 use trans_item::{TransItem, DefPathBasedNames, InstantiationMode};
 
@@ -502,7 +502,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
                     _ => bug!(),
                 }
             }
-            mir::Rvalue::Box(..) => {
+            mir::Rvalue::NullaryOp(mir::NullOp::Box, _) => {
                 let tcx = self.scx.tcx();
                 let exchange_malloc_fn_def_id = tcx
                     .lang_items
@@ -612,17 +612,7 @@ fn visit_instance_use<'a, 'tcx>(scx: &SharedCrateContext<'a, 'tcx>,
                 output.push(create_fn_trans_item(instance));
             }
         }
-        ty::InstanceDef::DropGlue(_, Some(ty)) => {
-            match ty.sty {
-                ty::TyArray(ety, _) |
-                ty::TySlice(ety)
-                    if is_direct_call =>
-                {
-                    // drop of arrays/slices is translated in-line.
-                    visit_drop_use(scx, ety, false, output);
-                }
-                _ => {}
-            };
+        ty::InstanceDef::DropGlue(_, Some(_)) => {
             output.push(create_fn_trans_item(instance));
         }
         ty::InstanceDef::ClosureOnceShim { .. } |
@@ -652,8 +642,8 @@ fn should_trans_locally<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, instance: &Instan
         }
         Some(_) => true,
         None => {
-            if tcx.sess.cstore.is_exported_symbol(def_id) ||
-                tcx.sess.cstore.is_foreign_item(def_id)
+            if tcx.is_exported_symbol(def_id) ||
+                tcx.is_foreign_item(def_id)
             {
                 // We can link to the item in question, no instance needed
                 // in this crate
